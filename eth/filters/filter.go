@@ -457,6 +457,11 @@ func (f *Filter) unindexedLogs(ctx context.Context, chainView *filtermaps.ChainV
 
 // blockLogs returns the logs matching the filter criteria within a single block.
 func (f *Filter) blockLogs(ctx context.Context, header *types.Header) ([]*types.Log, error) {
+	if header.LogIndex != nil {
+		// Post-EIP-7745b: bloom is replaced by LogIndex, always check receipts
+		// (in production, this would use the index for pre-filtering)
+		return f.checkMatches(ctx, header)
+	}
 	if bloomFilter(header.Bloom, f.addresses, f.topics) {
 		return f.checkMatches(ctx, header)
 	}

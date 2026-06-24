@@ -68,3 +68,20 @@ func (s *LogIndexState) UpdateChainParent(chainIdx uint8, root common.Hash) {
 func (s *LogIndexState) GetChainParent(chainIdx uint8) common.Hash {
 	return s.ChainParents[chainIdx]
 }
+
+// logIndexStateStore is an in-memory store of LogIndexState keyed by block number.
+// PoC simplification: in production this would be persisted to the database.
+var logIndexStateStore = make(map[uint64]*LogIndexState)
+
+// LoadLogIndexState retrieves LogIndexState for the given block number.
+func LoadLogIndexState(blockNumber uint64) *LogIndexState {
+	if state, ok := logIndexStateStore[blockNumber]; ok {
+		return state
+	}
+	return NewLogIndexState()
+}
+
+// SaveLogIndexState persists LogIndexState for the given block number.
+func SaveLogIndexState(blockNumber uint64, state *LogIndexState) {
+	logIndexStateStore[blockNumber] = state
+}

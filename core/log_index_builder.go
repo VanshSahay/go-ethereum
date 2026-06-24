@@ -23,12 +23,12 @@ import (
 
 // BuildLogIndexForBlock constructs the LogIndex for a block header per EIP-7745b.
 //
-// Schedule rules (chain i: range = 4^i blocks):
+// Schedule/publish rules per the spec (chain i: range = 4^i blocks):
 //
 //	Chain 0 (1-block):  updated EVERY block
-//	Chain 1 (4-block):  scheduled at block%4==0, published at block%4==1
-//	Chain 2 (16-block): scheduled at block%16==3, published at block%16==7
-//	Chain 3 (64-block): scheduled at block%64==15, published at block%64==31
+//	Chain 1 (4-block):  scheduled at block%4==3, published at block%4==0 (1-block delay)
+//	Chain 2 (16-block): scheduled at block%16==15, published at block%16==3 (4-block delay)
+//	Chain 3 (64-block): scheduled at block%64==63, published at block%64==15 (16-block delay)
 func BuildLogIndexForBlock(blockNumber uint64, receipts types.Receipts, state *LogIndexState) *types.LogIndex {
 	idx := &types.LogIndex{}
 
@@ -39,17 +39,17 @@ func BuildLogIndexForBlock(blockNumber uint64, receipts types.Receipts, state *L
 	state.UpdateChainParent(0, chain0Root.Table)
 	idx.Chain0 = chain0Root
 
-	// Chain 1: 4-block tables, schedule at %4==0, publish at %4==1
-	if blockNumber%4 == 0 {
+	// Chain 1: 4-block tables, schedule at %4==3, publish at %4==0
+	if blockNumber%4 == 3 {
 		root := computeMultiBlockTable(blockNumber-3, blockNumber, state.GetChainParent(1))
 		state.ScheduleTable(1, blockNumber, root)
 	}
-	if blockNumber%4 == 1 {
+	if blockNumber%4 == 0 {
 		if root, ok := state.GetScheduledTable(1, blockNumber-1); ok {
 			state.UpdateChainParent(1, root)
 			idx.Chain1 = types.ChainedTableRoot{Table: root, Parent: state.GetChainParent(1)}
 		} else {
-			// No scheduled table available (e.g., first block after fork)
+			// No scheduled table available (e.g., first block after fork, or block 0)
 			parent := state.GetChainParent(1)
 			idx.Chain1 = types.ChainedTableRoot{Table: parent, Parent: parent}
 		}
@@ -59,12 +59,12 @@ func BuildLogIndexForBlock(blockNumber uint64, receipts types.Receipts, state *L
 		idx.Chain1 = types.ChainedTableRoot{Table: parent, Parent: parent}
 	}
 
-	// Chain 2: 16-block tables, schedule at %16==3, publish at %16==7
-	if blockNumber%16 == 3 {
+	// Chain 2: 16-block tables, schedule at %16==15, publish at %16==3
+	if blockNumber%16 == 15 {
 		root := computeMultiBlockTable(blockNumber-15, blockNumber, state.GetChainParent(2))
 		state.ScheduleTable(2, blockNumber, root)
 	}
-	if blockNumber%16 == 7 {
+	if blockNumber%16 == 3 {
 		if root, ok := state.GetScheduledTable(2, blockNumber-4); ok {
 			state.UpdateChainParent(2, root)
 			idx.Chain2 = types.ChainedTableRoot{Table: root, Parent: state.GetChainParent(2)}
@@ -77,12 +77,12 @@ func BuildLogIndexForBlock(blockNumber uint64, receipts types.Receipts, state *L
 		idx.Chain2 = types.ChainedTableRoot{Table: parent, Parent: parent}
 	}
 
-	// Chain 3: 64-block tables, schedule at %64==15, publish at %64==31
-	if blockNumber%64 == 15 {
+	// Chain 3: 64-block tables, schedule at %64==63, publish at %64==15
+	if blockNumber%64 == 63 {
 		root := computeMultiBlockTable(blockNumber-63, blockNumber, state.GetChainParent(3))
 		state.ScheduleTable(3, blockNumber, root)
 	}
-	if blockNumber%64 == 31 {
+	if blockNumber%64 == 15 {
 		if root, ok := state.GetScheduledTable(3, blockNumber-16); ok {
 			state.UpdateChainParent(3, root)
 			idx.Chain3 = types.ChainedTableRoot{Table: root, Parent: state.GetChainParent(3)}

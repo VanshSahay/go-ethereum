@@ -153,15 +153,21 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if block.GasUsed() != res.GasUsed {
 		return fmt.Errorf("invalid gas used (remote: %d local: %d)", block.GasUsed(), res.GasUsed)
 	}
-	// Validate the received block's bloom with the one derived from the generated receipts.
-	// For valid blocks this should always validate to true.
-	//
-	// Receipts must go through MakeReceipt to calculate the receipt's bloom
-	// already. Merge the receipt's bloom together instead of recalculating
-	// everything.
-	rbloom := types.MergeBloom(res.Receipts)
-	if rbloom != header.Bloom {
-		return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
+	// Validate the received block's bloom or log_index with the one derived
+	// from the generated receipts. For valid blocks this should always validate to true.
+	if header.LogIndex != nil {
+		// EIP-7745b: validate log_index
+		logState := LoadLogIndexState(block.NumberU64() - 1)
+		expected := BuildLogIndexForBlock(block.NumberU64(), res.Receipts, logState)
+		if !header.LogIndex.Equal(*expected) {
+			return fmt.Errorf("invalid log_index (remote: %v  local: %v)", header.LogIndex, expected)
+		}
+	} else {
+		// Pre-fork: validate bloom
+		rbloom := types.MergeBloom(res.Receipts)
+		if rbloom != header.Bloom {
+			return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
+		}
 	}
 	// In stateless mode, return early because the receipt and state root are not
 	// provided through the witness, rather the cross validator needs to return it.

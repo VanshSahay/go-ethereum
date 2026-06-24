@@ -437,6 +437,13 @@ func AssembleBlock(chain consensus.ChainHeaderReader, header *types.Header, stat
 	// Assign the post-transition state root
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 
+	// EIP-7745b: build LogIndex if fork is active
+	if chain.Config().IsEIP7745b(header.Number, header.Time) {
+		logState := LoadLogIndexState(header.Number.Uint64() - 1)
+		header.LogIndex = BuildLogIndexForBlock(header.Number.Uint64(), receipts, logState)
+		SaveLogIndexState(header.Number.Uint64(), logState)
+	}
+
 	if !chain.Config().IsAmsterdam(header.Number, header.Time) {
 		return types.NewBlock(header, body, receipts, trie.NewStackTrie(nil))
 	}
