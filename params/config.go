@@ -467,6 +467,7 @@ type ChainConfig struct {
 	BPO5Time      *uint64 `json:"bpo5Time,omitempty"`      // BPO5 switch time (nil = no fork, 0 = already on bpo5)
 	AmsterdamTime *uint64 `json:"amsterdamTime,omitempty"` // Amsterdam switch time (nil = no fork, 0 = already on amsterdam)
 	UBTTime       *uint64 `json:"ubtTime,omitempty"`       // UBT switch time (nil = no fork, 0 = already on UBT)
+	EIP7745bTime  *uint64 `json:"eip7745bTime,omitempty"`  // EIP-7745b trustless log index switch time (nil = no fork, 0 = already on)
 
 	// TerminalTotalDifficulty is the amount of total difficulty reached by
 	// the network that triggers the consensus upgrade.
@@ -598,6 +599,9 @@ func (c *ChainConfig) String() string {
 	if c.UBTTime != nil {
 		result += fmt.Sprintf(", UBTTime: %v", *c.UBTTime)
 	}
+	if c.EIP7745bTime != nil {
+		result += fmt.Sprintf(", EIP7745bTime: %v", *c.EIP7745bTime)
+	}
 	result += "}"
 	return result
 }
@@ -692,6 +696,9 @@ func (c *ChainConfig) Description() string {
 	}
 	if c.UBTTime != nil {
 		banner += fmt.Sprintf(" - UBT:                         @%-10v blob: (%s)\n", *c.UBTTime, c.BlobScheduleConfig.UBT)
+	}
+	if c.EIP7745bTime != nil {
+		banner += fmt.Sprintf(" - EIP-7745b (Log Index):       @%-10v\n", *c.EIP7745bTime)
 	}
 	banner += fmt.Sprintf("\nAll fork specifications can be found at https://ethereum.github.io/execution-specs/src/ethereum/forks/\n")
 	return banner
@@ -869,6 +876,11 @@ func (c *ChainConfig) IsAmsterdam(num *big.Int, time uint64) bool {
 // IsUBT returns whether time is either equal to the Verkle fork time or greater.
 func (c *ChainConfig) IsUBT(num *big.Int, time uint64) bool {
 	return c.IsLondon(num) && isTimestampForked(c.UBTTime, time)
+}
+
+// IsEIP7745b returns whether the EIP-7745b trustless log index fork is active.
+func (c *ChainConfig) IsEIP7745b(num *big.Int, time uint64) bool {
+	return c.IsLondon(num) && isTimestampForked(c.EIP7745bTime, time)
 }
 
 // IsUBTGenesis checks whether the verkle fork is activated at the genesis block.
@@ -1125,6 +1137,9 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, headNumber *big.Int, 
 	if isForkTimestampIncompatible(c.AmsterdamTime, newcfg.AmsterdamTime, headTimestamp) {
 		return newTimestampCompatError("Amsterdam fork timestamp", c.AmsterdamTime, newcfg.AmsterdamTime)
 	}
+	if isForkTimestampIncompatible(c.EIP7745bTime, newcfg.EIP7745bTime, headTimestamp) {
+		return newTimestampCompatError("EIP-7745b fork timestamp", c.EIP7745bTime, newcfg.EIP7745bTime)
+	}
 	return nil
 }
 
@@ -1144,6 +1159,8 @@ func (c *ChainConfig) LatestFork(time uint64) forks.Fork {
 	london := c.LondonBlock
 
 	switch {
+	case c.IsEIP7745b(london, time):
+		return forks.EIP7745b
 	case c.IsAmsterdam(london, time):
 		return forks.Amsterdam
 	case c.IsBPO5(london, time):
@@ -1380,7 +1397,7 @@ type Rules struct {
 	IsByzantium, IsConstantinople, IsPetersburg, IsIstanbul bool
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague, IsOsaka        bool
-	IsAmsterdam, IsUBT                                      bool
+	IsAmsterdam, IsUBT, IsEIP7745b                          bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -1407,6 +1424,7 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsOsaka:          isMerge && c.IsOsaka(num, timestamp),
 		IsAmsterdam:      isMerge && c.IsAmsterdam(num, timestamp),
 		IsUBT:            isUBT,
+		IsEIP7745b:       isMerge && c.IsEIP7745b(num, timestamp),
 		IsEIP4762:        isUBT,
 	}
 }
