@@ -422,6 +422,9 @@ func (s *Ethereum) APIs() []rpc.API {
 			Namespace: "debug",
 			Service:   NewDebugAPI(s),
 		}, {
+			Namespace: "eth",
+			Service:   NewLogProofAPI(s.blockchain, s.chainDb),
+		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
 		},
