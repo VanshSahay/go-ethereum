@@ -105,7 +105,7 @@ func BuildLogIndexForBlock(blockNumber uint64, receipts types.Receipts, state *L
 // In production, this would:
 //   - Merge four lower-level sorted tables (merge-sort approach), OR
 //   - Read all receipts in the range and build the table from scratch.
-func computeMultiBlockTable(startBlock, endBlock uint64, parent common.Hash) common.Hash {
+func computeMultiBlockTable(_startBlock, _endBlock uint64, parent common.Hash) common.Hash {
 	// TODO: implement multi-block table construction.
 	// For the PoC, the scheduled root is the parent (chain is carried forward).
 	// A full implementation would aggregate receipts across the range.

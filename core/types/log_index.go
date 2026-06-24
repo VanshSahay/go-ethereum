@@ -140,28 +140,28 @@ func (li *LogIndex) DecodeRLP(s *rlp.Stream) error {
 	if err != nil {
 		return fmt.Errorf("log_index: expected outer list: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain0.Table)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain0.Table[:]); err != nil {
 		return fmt.Errorf("log_index: chain0.table: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain0.Parent)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain0.Parent[:]); err != nil {
 		return fmt.Errorf("log_index: chain0.parent: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain1.Table)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain1.Table[:]); err != nil {
 		return fmt.Errorf("log_index: chain1.table: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain1.Parent)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain1.Parent[:]); err != nil {
 		return fmt.Errorf("log_index: chain1.parent: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain2.Table)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain2.Table[:]); err != nil {
 		return fmt.Errorf("log_index: chain2.table: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain2.Parent)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain2.Parent[:]); err != nil {
 		return fmt.Errorf("log_index: chain2.parent: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain3.Table)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain3.Table[:]); err != nil {
 		return fmt.Errorf("log_index: chain3.table: %w", err)
 	}
-	if err := s.ReadBytes((*[common.HashLength]byte)(&li.Chain3.Parent)[:], common.HashLength); err != nil {
+	if err := s.ReadBytes(li.Chain3.Parent[:]); err != nil {
 		return fmt.Errorf("log_index: chain3.parent: %w", err)
 	}
 	return s.ListEnd()

@@ -62,7 +62,6 @@ func (n *BlockNonce) UnmarshalText(input []byte) error {
 }
 
 //go:generate go run github.com/fjl/gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
-//go:generate go run ../../rlp/rlpgen -type Header -out gen_header_rlp.go
 
 // Header represents a block header in the Ethereum blockchain.
 type Header struct {
@@ -105,6 +104,12 @@ type Header struct {
 
 	// SlotNumber was added by EIP-7843 and is ignored in legacy headers.
 	SlotNumber *uint64 `json:"slotNumber" rlp:"optional"`
+
+	// LogIndex was added by EIP-7745b. When non-nil, it replaces Bloom in RLP
+	// encoding at position 7. Pre-fork headers have LogIndex == nil.
+	// This field is tagged rlp:"-" to exclude it from reflection-based encoding;
+	// a manual EncodeRLP/DecodeRLP handles the fork-aware serialization.
+	LogIndex *LogIndex `json:"logIndex,omitempty" rlp:"-"`
 }
 
 // field type overrides for gencodec
@@ -126,6 +131,208 @@ type headerMarshaling struct {
 // RLP encoding.
 func (h *Header) Hash() common.Hash {
 	return rlpHash(h)
+}
+
+// EncodeRLP implements rlp.Encoder for Header with EIP-7745b support.
+// At RLP position 7, it encodes LogIndex (post-fork) or Bloom (pre-fork).
+func (h *Header) EncodeRLP(_w io.Writer) error {
+	w := rlp.NewEncoderBuffer(_w)
+	outer := w.List()
+	w.WriteBytes(h.ParentHash[:])
+	w.WriteBytes(h.UncleHash[:])
+	w.WriteBytes(h.Coinbase[:])
+	w.WriteBytes(h.Root[:])
+	w.WriteBytes(h.TxHash[:])
+	w.WriteBytes(h.ReceiptHash[:])
+	// Position 7: LogIndex (post-fork) or Bloom (pre-fork)
+	if h.LogIndex != nil {
+		if err := rlp.Encode(w, h.LogIndex); err != nil {
+			return err
+		}
+	} else {
+		w.WriteBytes(h.Bloom[:])
+	}
+	// Remaining fixed fields
+	if h.Difficulty == nil {
+		w.Write(rlp.EmptyString)
+	} else {
+		if h.Difficulty.Sign() == -1 {
+			return rlp.ErrNegativeBigInt
+		}
+		w.WriteBigInt(h.Difficulty)
+	}
+	if h.Number == nil {
+		w.Write(rlp.EmptyString)
+	} else {
+		if h.Number.Sign() == -1 {
+			return rlp.ErrNegativeBigInt
+		}
+		w.WriteBigInt(h.Number)
+	}
+	w.WriteUint64(h.GasLimit)
+	w.WriteUint64(h.GasUsed)
+	w.WriteUint64(h.Time)
+	w.WriteBytes(h.Extra)
+	w.WriteBytes(h.MixDigest[:])
+	w.WriteBytes(h.Nonce[:])
+	// Optional tail fields (cascading guards, identical to gen_header_rlp.go)
+	opt1 := h.BaseFee != nil
+	opt2 := h.WithdrawalsHash != nil
+	opt3 := h.BlobGasUsed != nil
+	opt4 := h.ExcessBlobGas != nil
+	opt5 := h.ParentBeaconRoot != nil
+	opt6 := h.RequestsHash != nil
+	opt7 := h.BlockAccessListHash != nil
+	opt8 := h.SlotNumber != nil
+	if opt1 || opt2 || opt3 || opt4 || opt5 || opt6 || opt7 || opt8 {
+		if h.BaseFee == nil {
+			w.Write(rlp.EmptyString)
+		} else {
+			if h.BaseFee.Sign() == -1 {
+				return rlp.ErrNegativeBigInt
+			}
+			w.WriteBigInt(h.BaseFee)
+		}
+	}
+	if opt2 || opt3 || opt4 || opt5 || opt6 || opt7 || opt8 {
+		if h.WithdrawalsHash == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteBytes(h.WithdrawalsHash[:])
+		}
+	}
+	if opt3 || opt4 || opt5 || opt6 || opt7 || opt8 {
+		if h.BlobGasUsed == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteUint64(*h.BlobGasUsed)
+		}
+	}
+	if opt4 || opt5 || opt6 || opt7 || opt8 {
+		if h.ExcessBlobGas == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteUint64(*h.ExcessBlobGas)
+		}
+	}
+	if opt5 || opt6 || opt7 || opt8 {
+		if h.ParentBeaconRoot == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteBytes(h.ParentBeaconRoot[:])
+		}
+	}
+	if opt6 || opt7 || opt8 {
+		if h.RequestsHash == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteBytes(h.RequestsHash[:])
+		}
+	}
+	if opt7 || opt8 {
+		if h.BlockAccessListHash == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteBytes(h.BlockAccessListHash[:])
+		}
+	}
+	if opt8 {
+		if h.SlotNumber == nil {
+			w.Write([]byte{0x80})
+		} else {
+			w.WriteUint64(*h.SlotNumber)
+		}
+	}
+	w.ListEnd(outer)
+	return w.Flush()
+}
+
+// DecodeRLP implements rlp.Decoder for Header with EIP-7745b support.
+// It detects the Bloom/LogIndex bifurcation at RLP position 7 via Kind().
+func (h *Header) DecodeRLP(s *rlp.Stream) error {
+	_, err := s.List()
+	if err != nil {
+		return err
+	}
+	// Fixed fields 1-6
+	if err := s.ReadBytes(h.ParentHash[:]); err != nil {
+		return fmt.Errorf("parentHash: %w", err)
+	}
+	if err := s.ReadBytes(h.UncleHash[:]); err != nil {
+		return fmt.Errorf("uncleHash: %w", err)
+	}
+	if err := s.ReadBytes(h.Coinbase[:]); err != nil {
+		return fmt.Errorf("coinbase: %w", err)
+	}
+	if err := s.ReadBytes(h.Root[:]); err != nil {
+		return fmt.Errorf("root: %w", err)
+	}
+	if err := s.ReadBytes(h.TxHash[:]); err != nil {
+		return fmt.Errorf("txHash: %w", err)
+	}
+	if err := s.ReadBytes(h.ReceiptHash[:]); err != nil {
+		return fmt.Errorf("receiptHash: %w", err)
+	}
+	// Position 7: Bloom (pre-fork, 256 bytes) or LogIndex (post-fork, RLP list)
+	kind, _, err := s.Kind()
+	if err != nil {
+		return fmt.Errorf("bloom/logIndex: %w", err)
+	}
+	if kind == rlp.List {
+		// Post-EIP-7745b: decode as LogIndex
+		h.LogIndex = new(LogIndex)
+		if err := s.Decode(h.LogIndex); err != nil {
+			return fmt.Errorf("logIndex: %w", err)
+		}
+	} else {
+		// Pre-fork: decode as Bloom (256 bytes)
+		if err := s.ReadBytes(h.Bloom[:]); err != nil {
+			return fmt.Errorf("bloom: %w", err)
+		}
+	}
+
+	// Decode remaining fixed fields with reflection-based decoder on a temp struct.
+	// We use a minimal struct matching the tail of the header.
+	type tailFields struct {
+		Difficulty  *big.Int
+		Number      *big.Int
+		GasLimit    uint64
+		GasUsed     uint64
+		Time        uint64
+		Extra       []byte
+		MixDigest   common.Hash
+		Nonce       BlockNonce
+		BaseFee     *big.Int     `rlp:"optional"`
+		WithdrawalsHash *common.Hash `rlp:"optional"`
+		BlobGasUsed *uint64      `rlp:"optional"`
+		ExcessBlobGas *uint64    `rlp:"optional"`
+		ParentBeaconRoot *common.Hash `rlp:"optional"`
+		RequestsHash *common.Hash `rlp:"optional"`
+		BlockAccessListHash *common.Hash `rlp:"optional"`
+		SlotNumber  *uint64      `rlp:"optional"`
+	}
+	var tail tailFields
+	if err := s.Decode(&tail); err != nil {
+		return fmt.Errorf("header tail: %w", err)
+	}
+	h.Difficulty = tail.Difficulty
+	h.Number = tail.Number
+	h.GasLimit = tail.GasLimit
+	h.GasUsed = tail.GasUsed
+	h.Time = tail.Time
+	h.Extra = tail.Extra
+	h.MixDigest = tail.MixDigest
+	h.Nonce = tail.Nonce
+	h.BaseFee = tail.BaseFee
+	h.WithdrawalsHash = tail.WithdrawalsHash
+	h.BlobGasUsed = tail.BlobGasUsed
+	h.ExcessBlobGas = tail.ExcessBlobGas
+	h.ParentBeaconRoot = tail.ParentBeaconRoot
+	h.RequestsHash = tail.RequestsHash
+	h.BlockAccessListHash = tail.BlockAccessListHash
+	h.SlotNumber = tail.SlotNumber
+
+	return s.ListEnd()
 }
 
 var headerSize = common.StorageSize(reflect.TypeFor[Header]().Size())
@@ -262,7 +469,10 @@ func NewBlock(header *Header, body *Body, receipts []*Receipt, hasher ListHasher
 		// Receipts must go through MakeReceipt to calculate the receipt's bloom
 		// already. Merge the receipt's bloom together instead of recalculating
 		// everything.
-		b.header.Bloom = MergeBloom(receipts)
+		// Post-EIP-7745b, bloom is replaced by LogIndex (set by caller).
+		if b.header.LogIndex == nil {
+			b.header.Bloom = MergeBloom(receipts)
+		}
 	}
 
 	if len(uncles) == 0 {
@@ -333,6 +543,10 @@ func CopyHeader(h *Header) *Header {
 		cpy.SlotNumber = new(uint64)
 		*cpy.SlotNumber = *h.SlotNumber
 	}
+	if h.LogIndex != nil {
+		cpy.LogIndex = new(LogIndex)
+		*cpy.LogIndex = *h.LogIndex
+	}
 	return &cpy
 }
 
@@ -397,7 +611,13 @@ func (b *Block) Time() uint64         { return b.header.Time }
 func (b *Block) NumberU64() uint64        { return b.header.Number.Uint64() }
 func (b *Block) MixDigest() common.Hash   { return b.header.MixDigest }
 func (b *Block) Nonce() uint64            { return binary.BigEndian.Uint64(b.header.Nonce[:]) }
-func (b *Block) Bloom() Bloom             { return b.header.Bloom }
+func (b *Block) Bloom() Bloom {
+	if b.header.LogIndex != nil {
+		return Bloom{} // Post-EIP-7745b: bloom replaced by log_index
+	}
+	return b.header.Bloom
+}
+func (b *Block) LogIndex() *LogIndex { return b.header.LogIndex }
 func (b *Block) Coinbase() common.Address { return b.header.Coinbase }
 func (b *Block) Root() common.Hash        { return b.header.Root }
 func (b *Block) ParentHash() common.Hash  { return b.header.ParentHash }
