@@ -249,90 +249,83 @@ func (h *Header) EncodeRLP(_w io.Writer) error {
 
 // DecodeRLP implements rlp.Decoder for Header with EIP-7745b support.
 // It detects the Bloom/LogIndex bifurcation at RLP position 7 via Kind().
+// headerForRLP is a helper struct used by Header.DecodeRLP to capture position 7
+// as raw bytes, enabling Bloom vs LogIndex detection.
+type headerForRLP struct {
+	ParentHash      common.Hash
+	UncleHash       common.Hash
+	Coinbase        common.Address
+	Root            common.Hash
+	TxHash          common.Hash
+	ReceiptHash     common.Hash
+	BloomOrLogIndex rlp.RawValue // raw RLP bytes at position 7 (bloom bytes or logIndex list)
+	Difficulty      *big.Int
+	Number          *big.Int
+	GasLimit        uint64
+	GasUsed         uint64
+	Time            uint64
+	Extra           []byte
+	MixDigest       common.Hash
+	Nonce           BlockNonce
+	BaseFee             *big.Int     `rlp:"optional"`
+	WithdrawalsHash     *common.Hash `rlp:"optional"`
+	BlobGasUsed         *uint64      `rlp:"optional"`
+	ExcessBlobGas       *uint64      `rlp:"optional"`
+	ParentBeaconRoot    *common.Hash `rlp:"optional"`
+	RequestsHash        *common.Hash `rlp:"optional"`
+	BlockAccessListHash *common.Hash `rlp:"optional"`
+	SlotNumber          *uint64      `rlp:"optional"`
+}
+
+// DecodeRLP implements rlp.Decoder for Header with EIP-7745b support.
+// It reads the entire header as raw bytes first, then decodes with a helper
+// struct that captures position 7 as raw bytes for Bloom/LogIndex detection.
 func (h *Header) DecodeRLP(s *rlp.Stream) error {
-	_, err := s.List()
+	raw, err := s.Raw()
 	if err != nil {
 		return err
 	}
-	// Fixed fields 1-6
-	if err := s.ReadBytes(h.ParentHash[:]); err != nil {
-		return fmt.Errorf("parentHash: %w", err)
+
+	var rawH headerForRLP
+	if err := rlp.DecodeBytes(raw, &rawH); err != nil {
+		return err
 	}
-	if err := s.ReadBytes(h.UncleHash[:]); err != nil {
-		return fmt.Errorf("uncleHash: %w", err)
-	}
-	if err := s.ReadBytes(h.Coinbase[:]); err != nil {
-		return fmt.Errorf("coinbase: %w", err)
-	}
-	if err := s.ReadBytes(h.Root[:]); err != nil {
-		return fmt.Errorf("root: %w", err)
-	}
-	if err := s.ReadBytes(h.TxHash[:]); err != nil {
-		return fmt.Errorf("txHash: %w", err)
-	}
-	if err := s.ReadBytes(h.ReceiptHash[:]); err != nil {
-		return fmt.Errorf("receiptHash: %w", err)
-	}
-	// Position 7: Bloom (pre-fork, 256 bytes) or LogIndex (post-fork, RLP list)
-	kind, _, err := s.Kind()
-	if err != nil {
-		return fmt.Errorf("bloom/logIndex: %w", err)
-	}
-	if kind == rlp.List {
-		// Post-EIP-7745b: decode as LogIndex
+
+	h.ParentHash = rawH.ParentHash
+	h.UncleHash = rawH.UncleHash
+	h.Coinbase = rawH.Coinbase
+	h.Root = rawH.Root
+	h.TxHash = rawH.TxHash
+	h.ReceiptHash = rawH.ReceiptHash
+
+	// Position 7: RLP list (0xc0+) = LogIndex, bytes (0x80+) = Bloom
+	if len(rawH.BloomOrLogIndex) > 0 && rawH.BloomOrLogIndex[0] >= 0xc0 {
 		h.LogIndex = new(LogIndex)
-		if err := s.Decode(h.LogIndex); err != nil {
+		if err := rlp.DecodeBytes(rawH.BloomOrLogIndex, h.LogIndex); err != nil {
 			return fmt.Errorf("logIndex: %w", err)
 		}
-	} else {
-		// Pre-fork: decode as Bloom (256 bytes)
-		if err := s.ReadBytes(h.Bloom[:]); err != nil {
-			return fmt.Errorf("bloom: %w", err)
-		}
+	} else if len(rawH.BloomOrLogIndex) == 256 {
+		copy(h.Bloom[:], rawH.BloomOrLogIndex)
 	}
 
-	// Decode remaining fixed fields with reflection-based decoder on a temp struct.
-	// We use a minimal struct matching the tail of the header.
-	type tailFields struct {
-		Difficulty  *big.Int
-		Number      *big.Int
-		GasLimit    uint64
-		GasUsed     uint64
-		Time        uint64
-		Extra       []byte
-		MixDigest   common.Hash
-		Nonce       BlockNonce
-		BaseFee     *big.Int     `rlp:"optional"`
-		WithdrawalsHash *common.Hash `rlp:"optional"`
-		BlobGasUsed *uint64      `rlp:"optional"`
-		ExcessBlobGas *uint64    `rlp:"optional"`
-		ParentBeaconRoot *common.Hash `rlp:"optional"`
-		RequestsHash *common.Hash `rlp:"optional"`
-		BlockAccessListHash *common.Hash `rlp:"optional"`
-		SlotNumber  *uint64      `rlp:"optional"`
-	}
-	var tail tailFields
-	if err := s.Decode(&tail); err != nil {
-		return fmt.Errorf("header tail: %w", err)
-	}
-	h.Difficulty = tail.Difficulty
-	h.Number = tail.Number
-	h.GasLimit = tail.GasLimit
-	h.GasUsed = tail.GasUsed
-	h.Time = tail.Time
-	h.Extra = tail.Extra
-	h.MixDigest = tail.MixDigest
-	h.Nonce = tail.Nonce
-	h.BaseFee = tail.BaseFee
-	h.WithdrawalsHash = tail.WithdrawalsHash
-	h.BlobGasUsed = tail.BlobGasUsed
-	h.ExcessBlobGas = tail.ExcessBlobGas
-	h.ParentBeaconRoot = tail.ParentBeaconRoot
-	h.RequestsHash = tail.RequestsHash
-	h.BlockAccessListHash = tail.BlockAccessListHash
-	h.SlotNumber = tail.SlotNumber
+	h.Difficulty = rawH.Difficulty
+	h.Number = rawH.Number
+	h.GasLimit = rawH.GasLimit
+	h.GasUsed = rawH.GasUsed
+	h.Time = rawH.Time
+	h.Extra = rawH.Extra
+	h.MixDigest = rawH.MixDigest
+	h.Nonce = rawH.Nonce
+	h.BaseFee = rawH.BaseFee
+	h.WithdrawalsHash = rawH.WithdrawalsHash
+	h.BlobGasUsed = rawH.BlobGasUsed
+	h.ExcessBlobGas = rawH.ExcessBlobGas
+	h.ParentBeaconRoot = rawH.ParentBeaconRoot
+	h.RequestsHash = rawH.RequestsHash
+	h.BlockAccessListHash = rawH.BlockAccessListHash
+	h.SlotNumber = rawH.SlotNumber
 
-	return s.ListEnd()
+	return nil
 }
 
 var headerSize = common.StorageSize(reflect.TypeFor[Header]().Size())
