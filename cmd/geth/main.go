@@ -60,6 +60,7 @@ var (
 		utils.OverrideBPO1,
 		utils.OverrideBPO2,
 		utils.OverrideUBT,
+		utils.OverrideEIP8304,
 		utils.OverrideGenesisFlag,
 		utils.TxPoolLocalsFlag,
 		utils.TxPoolNoLocalsFlag,

@@ -232,6 +232,7 @@ var (
 		TerminalTotalDifficulty: big.NewInt(0),
 		PragueTime:              newUint64(0),
 		OsakaTime:               newUint64(0),
+		EIP8304Time:             newUint64(0),
 		BlobScheduleConfig: &BlobScheduleConfig{
 			Cancun: DefaultCancunBlobConfig,
 			Prague: DefaultPragueBlobConfig,
@@ -958,6 +959,7 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		{name: "bpo4", timestamp: c.BPO4Time, optional: true},
 		{name: "bpo5", timestamp: c.BPO5Time, optional: true},
 		{name: "amsterdam", timestamp: c.AmsterdamTime, optional: true},
+		{name: "eip8304", timestamp: c.EIP8304Time, optional: true},
 	} {
 		if lastFork.name != "" {
 			switch {
@@ -1131,6 +1133,9 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, headNumber *big.Int, 
 	if isForkTimestampIncompatible(c.AmsterdamTime, newcfg.AmsterdamTime, headTimestamp) {
 		return newTimestampCompatError("Amsterdam fork timestamp", c.AmsterdamTime, newcfg.AmsterdamTime)
 	}
+	if isForkTimestampIncompatible(c.EIP8304Time, newcfg.EIP8304Time, headTimestamp) {
+		return newTimestampCompatError("EIP-8304 fork timestamp", c.EIP8304Time, newcfg.EIP8304Time)
+	}
 	return nil
 }
 
@@ -1150,6 +1155,8 @@ func (c *ChainConfig) LatestFork(time uint64) forks.Fork {
 	london := c.LondonBlock
 
 	switch {
+	case c.IsEIP8304(london, time):
+		return forks.EIP8304
 	case c.IsAmsterdam(london, time):
 		return forks.Amsterdam
 	case c.IsBPO5(london, time):
@@ -1221,6 +1228,9 @@ func (c *ChainConfig) ActiveSystemContracts(time uint64) map[string]common.Addre
 	if fork >= forks.Cancun {
 		active["BEACON_ROOTS_ADDRESS"] = BeaconRootsAddress
 	}
+	if fork >= forks.EIP8304 {
+		active["INDEX_CONTRACT_ADDRESS"] = IndexContractAddress
+	}
 	return active
 }
 
@@ -1228,6 +1238,8 @@ func (c *ChainConfig) ActiveSystemContracts(time uint64) map[string]common.Addre
 // the fork isn't defined or isn't a time-based fork.
 func (c *ChainConfig) Timestamp(fork forks.Fork) *uint64 {
 	switch {
+	case fork == forks.EIP8304:
+		return c.EIP8304Time
 	case fork == forks.BPO5:
 		return c.BPO5Time
 	case fork == forks.BPO4:
@@ -1391,7 +1403,7 @@ type Rules struct {
 	IsByzantium, IsConstantinople, IsPetersburg, IsIstanbul bool
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague, IsOsaka        bool
-	IsAmsterdam, IsUBT                                      bool
+	IsAmsterdam, IsEIP8304, IsUBT                            bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -1417,6 +1429,7 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsPrague:         isMerge && c.IsPrague(num, timestamp),
 		IsOsaka:          isMerge && c.IsOsaka(num, timestamp),
 		IsAmsterdam:      isMerge && c.IsAmsterdam(num, timestamp),
+		IsEIP8304:        isMerge && c.IsEIP8304(num, timestamp),
 		IsUBT:            isUBT,
 		IsEIP4762:        isUBT,
 	}

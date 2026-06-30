@@ -269,6 +269,11 @@ var (
 		Usage:    "Manually specify the UBT fork timestamp, overriding the bundled setting",
 		Category: flags.EthCategory,
 	}
+	OverrideEIP8304 = &cli.Uint64Flag{
+		Name:     "override.eip8304",
+		Usage:    "Manually specify the EIP-8304 fork timestamp, overriding the bundled setting",
+		Category: flags.EthCategory,
+	}
 	OverrideGenesisFlag = &cli.StringFlag{
 		Name:     "override.genesis",
 		Usage:    "Load genesis block and configuration from file at this path",

@@ -240,6 +240,10 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		v := ctx.Uint64(utils.OverrideUBT.Name)
 		cfg.Eth.OverrideUBT = &v
 	}
+	if ctx.IsSet(utils.OverrideEIP8304.Name) {
+		v := ctx.Uint64(utils.OverrideEIP8304.Name)
+		cfg.Eth.OverrideEIP8304 = &v
+	}
 
 	// Start metrics export if enabled.
 	utils.SetupMetrics(&cfg.Metrics)

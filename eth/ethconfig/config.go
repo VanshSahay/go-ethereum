@@ -215,6 +215,9 @@ type Config struct {
 	// OverrideUBT (TODO: remove after the fork)
 	OverrideUBT *uint64 `toml:",omitempty"`
 
+	// OverrideEIP8304 (TODO: remove after the fork)
+	OverrideEIP8304 *uint64 `toml:",omitempty"`
+
 	// EIP-7966: eth_sendRawTransactionSync timeouts
 	TxSyncDefaultTimeout time.Duration `toml:",omitempty"`
 	TxSyncMaxTimeout     time.Duration `toml:",omitempty"`
