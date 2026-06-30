@@ -289,6 +289,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if config.OverrideUBT != nil {
 		overrides.OverrideUBT = config.OverrideUBT
 	}
+	if config.OverrideEIP8304 != nil {
+		overrides.OverrideEIP8304 = config.OverrideEIP8304
+	}
 	options.Overrides = &overrides
 
 	eth.blockchain, err = core.NewBlockChain(chainDb, config.Genesis, eth.engine, options)
@@ -415,6 +418,9 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "eth",
 			Service:   downloader.NewDownloaderAPI(s.handler.downloader, s.blockchain),
+		}, {
+			Namespace: "eth",
+			Service:   NewLogProofAPI(s.blockchain),
 		}, {
 			Namespace: "admin",
 			Service:   NewAdminAPI(s),
