@@ -362,7 +362,7 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, 
 	for _, receipt := range receipts {
 		allLogs = append(allLogs, receipt.Logs...)
 	}
-	requests, bal, err := core.PostExecution(context.Background(), chainConfig, vmContext.BlockNumber, vmContext.Time, allLogs, evm, uint32(len(receipts)+1))
+	requests, bal, err := core.PostExecution(context.Background(), chainConfig, vmContext.BlockNumber, vmContext.Time, allLogs, evm, uint32(len(receipts)+1), nil)
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("failed to process post-execution: %v", err))
 	}

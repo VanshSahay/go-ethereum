@@ -211,7 +211,12 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	}
 
 	// Collect consensus-layer requests if Prague is enabled.
-	requests, bal, err := core.PostExecution(ctx, miner.chainConfig, work.header.Number, work.header.Time, allLogs, work.evm, uint32(work.tcount+1))
+	// EIP-8304: build log index tables for the system call inside PostExecution
+	var tablesToWrite []core.TableWrite
+	if miner.chainConfig.IsEIP8304(work.header.Number, work.header.Time) {
+		tablesToWrite = core.BuildLogIndexForBlock(work.header.Number.Uint64(), work.receipts, work.header.ParentHash)
+	}
+	requests, bal, err := core.PostExecution(ctx, miner.chainConfig, work.header.Number, work.header.Time, allLogs, work.evm, uint32(work.tcount+1), tablesToWrite)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}

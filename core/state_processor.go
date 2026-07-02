@@ -117,20 +117,17 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 		blockAccessList.Merge(bal)
 		spanEnd(nil)
 	}
-	requests, bal, err := PostExecution(ctx, config, block.Number(), block.Time(), allLogs, evm, uint32(len(block.Transactions())+1))
+	// EIP-8304: build log index tables; system calls are made inside PostExecution
+	var tablesToWrite []TableWrite
+	if config.IsEIP8304(block.Number(), block.Time()) {
+		tablesToWrite = BuildLogIndexForBlock(block.Number().Uint64(), receipts, block.ParentHash())
+	}
+	requests, bal, err := PostExecution(ctx, config, block.Number(), block.Time(), allLogs, evm, uint32(len(block.Transactions())+1), tablesToWrite)
 	if err != nil {
 		return nil, err
 	}
 	blockAccessList.Merge(bal)
 
-	// EIP-8304: write log index table roots to the on-chain contract
-	if config.IsEIP8304(block.Number(), block.Time()) {
-		// Build log index tables for this block
-		tablesToWrite := BuildLogIndexForBlock(block.Number().Uint64(), receipts, block.ParentHash())
-		if len(tablesToWrite) > 0 {
-			ProcessLogIndexWrites(tablesToWrite, evm, blockAccessList)
-		}
-	}
 
 	// Finalize the block, applying any consensus engine specific extras
 	// (e.g. block rewards).
@@ -170,7 +167,7 @@ func PreExecution(ctx context.Context, beaconRoot *common.Hash, parent common.Ha
 // PostExecution processes post-execution system calls when Prague is enabled.
 // If Prague is not activated, it returns null requests to differentiate from
 // empty requests.
-func PostExecution(ctx context.Context, config *params.ChainConfig, number *big.Int, time uint64, allLogs []*types.Log, evm *vm.EVM, blockAccessIndex uint32) (requests [][]byte, blockAccessList *bal.ConstructionBlockAccessList, err error) {
+func PostExecution(ctx context.Context, config *params.ChainConfig, number *big.Int, time uint64, allLogs []*types.Log, evm *vm.EVM, blockAccessIndex uint32, tablesToWrite []TableWrite) (requests [][]byte, blockAccessList *bal.ConstructionBlockAccessList, err error) {
 	_, _, spanEnd := telemetry.StartSpan(ctx, "core.postExecution")
 	defer spanEnd(&err)
 
@@ -202,6 +199,12 @@ func PostExecution(ctx context.Context, config *params.ChainConfig, number *big.
 		}
 		if err := ProcessBuilderExitQueue(&requests, rules, evm, blockAccessIndex, blockAccessList); err != nil {
 			return nil, nil, fmt.Errorf("failed to process builder exit queue: %w", err)
+		}
+	}
+	// EIP-8304: write log index table roots to the on-chain contract
+	for _, tw := range tablesToWrite {
+		if err := ProcessLogIndexWrites(tw, rules, evm, blockAccessIndex, blockAccessList); err != nil {
+			return nil, nil, fmt.Errorf("failed to process log index write: %w", err)
 		}
 	}
 	return requests, blockAccessList, nil
@@ -335,45 +338,45 @@ func ProcessBeaconBlockRoot(beaconRoot common.Hash, evm *vm.EVM, blockAccessList
 	blockAccessList.Merge(evm.StateDB.Finalise(true))
 }
 
-// ProcessLogIndexWrites performs the EIP-8304 system calls to write table roots
-// to the on-chain index contract. It follows the EIP-4788 system call pattern.
-// Multiple system calls may be made if multiple tables are published in this block.
-func ProcessLogIndexWrites(tablesToWrite []TableWrite, evm *vm.EVM, blockAccessList *bal.ConstructionBlockAccessList) {
-	for _, tw := range tablesToWrite {
-		// Tracer hooks
-		if tracer := evm.Config.Tracer; tracer != nil {
-			onSystemCallStart(tracer, evm.GetVMContext())
-			if tracer.OnSystemCallEnd != nil {
-				defer tracer.OnSystemCallEnd()
-			}
+// ProcessLogIndexWrites performs the EIP-8304 system call to write a table root
+// to the on-chain index contract. It follows the same pattern as processRequestsSystemCall
+// (EIP-7685) to ensure state changes persist correctly.
+func ProcessLogIndexWrites(tw TableWrite, rules params.Rules, evm *vm.EVM, blockAccessIndex uint32, blockAccessList *bal.ConstructionBlockAccessList) error {
+	if tracer := evm.Config.Tracer; tracer != nil {
+		onSystemCallStart(tracer, evm.GetVMContext())
+		if tracer.OnSystemCallEnd != nil {
+			defer tracer.OnSystemCallEnd()
 		}
-		// Allocate gas budget
-		gasLimit, gasBudget := systemCallGasBudget(evm)
-		// Build 96-byte calldata: first_block(32) + table_size(32) + table_root(32)
-		calldata := make([]byte, 96)
-		binary.BigEndian.PutUint64(calldata[24:32], tw.FirstBlock)
-		binary.BigEndian.PutUint64(calldata[56:64], tw.TableSize)
-		copy(calldata[64:96], tw.Root[:])
-		// Build the message
-		msg := &Message{
-			From:      params.SystemAddress,
-			GasLimit:  gasLimit,
-			GasPrice:  uint256.NewInt(0),
-			GasFeeCap: uint256.NewInt(0),
-			GasTipCap: uint256.NewInt(0),
-			To:        &params.IndexContractAddress,
-			Data:      calldata,
-		}
-		evm.SetTxContext(NewEVMTxContext(msg))
-		evm.StateDB.Prepare(evm.GetRules(), common.Address{}, common.Address{}, nil, nil, nil)
-		evm.StateDB.SetTxContext(common.Hash{}, 0, 0)
-		evm.StateDB.AddAddressToAccessList(params.IndexContractAddress)
-		_, _, _ = evm.Call(msg.From, *msg.To, msg.Data, gasBudget, common.U2560)
-		if evm.StateDB.AccessEvents() != nil {
-			evm.StateDB.AccessEvents().Merge(evm.AccessEvents)
-		}
-		blockAccessList.Merge(evm.StateDB.Finalise(true))
 	}
+	gasLimit, gasBudget := systemCallGasBudget(evm)
+	// Build 96-byte calldata: first_block(32) + table_size(32) + table_root(32)
+	calldata := make([]byte, 96)
+	binary.BigEndian.PutUint64(calldata[24:32], tw.FirstBlock)
+	binary.BigEndian.PutUint64(calldata[56:64], tw.TableSize)
+	copy(calldata[64:96], tw.Root[:])
+	msg := &Message{
+		From:      params.SystemAddress,
+		GasLimit:  gasLimit,
+		GasPrice:  uint256.NewInt(0),
+		GasFeeCap: uint256.NewInt(0),
+		GasTipCap: uint256.NewInt(0),
+		To:        &params.IndexContractAddress,
+		Data:      calldata,
+	}
+	evm.SetTxContext(NewEVMTxContext(msg))
+	evm.StateDB.Prepare(rules, common.Address{}, common.Address{}, nil, nil, nil)
+	evm.StateDB.SetTxContext(common.Hash{}, 0, blockAccessIndex)
+	evm.StateDB.AddAddressToAccessList(params.IndexContractAddress)
+	_, _, err := evm.Call(msg.From, *msg.To, msg.Data, gasBudget, common.U2560)
+	if evm.StateDB.AccessEvents() != nil {
+		evm.StateDB.AccessEvents().Merge(evm.AccessEvents)
+	}
+	bal := evm.StateDB.Finalise(true)
+	if err != nil {
+		return fmt.Errorf("EIP-8304 system call failed: %v", err)
+	}
+	blockAccessList.Merge(bal)
+	return nil
 }
 
 // ProcessParentBlockHash stores the parent block hash in the history storage contract
