@@ -74,6 +74,10 @@ jobs:
           echo "RPC (http):  $RPC_URL"
           echo "WS (wss):    ${WS_URL/https:/wss:}"
           echo "=============================================="
+          # Also emit as check-run annotations, fetchable live via the API:
+          # gh api repos/{owner}/{repo}/check-runs/<id>/annotations
+          echo "::notice title=Devnet RPC::$RPC_URL"
+          echo "::notice title=Devnet WS::${WS_URL/https:/wss:}"
 
       # Sanity-check the chain and the BAL RPC
       - name: Verify devnet
