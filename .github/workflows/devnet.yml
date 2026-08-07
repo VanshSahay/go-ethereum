@@ -1,0 +1,94 @@
+name: bal-devnet
+
+# Runs the BAL devnet on a hosted runner for ~5.5h windows and exposes the
+# RPC/WS publicly via cloudflared quick tunnels. URLs are printed in the
+# "Open tunnels" step log.
+#
+# Requirements:
+#   - This repository must be PUBLIC (unlimited Actions minutes; private
+#     repos cap at 2000 min/month).
+#   - The branch must contain the committed geth changes (eth_getBlockAccessList
+#     RPC) — the workflow builds the image from the checked-out tree.
+on:
+  workflow_dispatch:
+  schedule:
+    # every 6h: each job is capped at 6h, so runs line up near-continuously
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: bal-devnet
+  cancel-in-progress: false
+
+jobs:
+  devnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the custom geth image (includes eth_getBlockAccessList)
+      - name: Build geth image
+        run: docker build -t my-geth:bal .
+
+      # Install the Kurtosis CLI
+      - name: Install kurtosis
+        run: |
+          curl -LsSf https://github.com/kurtosis-tech/kurtosis-cli-release-artifacts/releases/latest/download/kurtosis-cli-linux-amd64 -o kurtosis
+          chmod +x kurtosis
+          sudo mv kurtosis /usr/local/bin/
+          kurtosis version
+
+      # Launch the devnet
+      - name: Launch devnet
+        run: |
+          kurtosis run --enclave bal-devnet github.com/ethpandaops/ethereum-package --args-file devnet/args.json > /tmp/devnet-run.log 2>&1
+          tail -5 /tmp/devnet-run.log
+
+      # Expose RPC + WS publicly via cloudflared quick tunnels
+      - name: Install cloudflared
+        run: |
+          curl -LsSf https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: Open tunnels
+        run: |
+          RPC_PORT=$(kurtosis port print bal-devnet el-1-geth-lighthouse rpc | awk -F: '{print $2}')
+          WS_PORT=$(kurtosis port print bal-devnet el-1-geth-lighthouse ws | awk -F: '{print $2}')
+          cloudflared tunnel --url http://127.0.0.1:$RPC_PORT --no-autoupdate > /tmp/rpc-tunnel.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:$WS_PORT --no-autoupdate > /tmp/ws-tunnel.log 2>&1 &
+          for i in $(seq 1 30); do
+            RPC_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/rpc-tunnel.log | head -1)
+            WS_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/ws-tunnel.log | head -1)
+            [ -n "$RPC_URL" ] && [ -n "$WS_URL" ] && break
+            sleep 5
+          done
+          if [ -z "$RPC_URL" ] || [ -z "$WS_URL" ]; then
+            echo "tunnel setup failed:"; tail -5 /tmp/rpc-tunnel.log; tail -5 /tmp/ws-tunnel.log
+            exit 1
+          fi
+          echo "RPC_URL=$RPC_URL" >> "$GITHUB_ENV"
+          echo "WS_URL=$WS_URL" >> "$GITHUB_ENV"
+          echo "=============================================="
+          echo "RPC (http):  $RPC_URL"
+          echo "WS (wss):    ${WS_URL/https:/wss:}"
+          echo "=============================================="
+
+      # Sanity-check the chain and the BAL RPC
+      - name: Verify devnet
+        run: |
+          sleep 30
+          curl -s -X POST -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+            "$RPC_URL" | head -c 200; echo
+          curl -s -X POST -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","method":"eth_getBlockAccessList","params":["latest"],"id":1}' \
+            "$RPC_URL" | head -c 200; echo
+
+      # Hold the window open (job is hard-capped at 6h)
+      - name: Keep alive
+        run: sleep 19800
+
+      - name: Teardown
+        if: always()
+        run: kurtosis enclave rm bal-devnet --force || true
