@@ -23,6 +23,8 @@ jobs:
   devnet:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +80,18 @@ jobs:
           # gh api repos/{owner}/{repo}/check-runs/<id>/annotations
           echo "::notice title=Devnet RPC::$RPC_URL"
           echo "::notice title=Devnet WS::${WS_URL/https:/wss:}"
+
+      - name: Publish URLs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p devnet
+          echo "{\"rpc\":\"$RPC_URL\",\"ws\":\"${WS_URL/https:/wss:}\",\"updated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > devnet/current-url.json
+          git config user.name "devnet"
+          git config user.email "devnet@users.noreply.github.com"
+          git add devnet/current-url.json
+          git commit -m "devnet: publish urls" --allow-empty
+          git push origin HEAD:bal-devnet
 
       # Sanity-check the chain and the BAL RPC
       - name: Verify devnet
