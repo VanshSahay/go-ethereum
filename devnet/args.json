@@ -1,5 +1,24 @@
 {
   "additional_services": ["spamoor"],
+  "spamoor_params": {
+    "spammers": [
+      {
+        "name": "EOA transfers",
+        "scenario": "eoatx",
+        "config": {"throughput": 200, "max_pending": 400, "max_wallets": 200, "base_fee": 20}
+      },
+      {
+        "name": "ERC-20 transfers",
+        "scenario": "erc20tx",
+        "config": {"throughput": 60, "max_pending": 120, "max_wallets": 120}
+      },
+      {
+        "name": "Curve swaps",
+        "scenario": "curve-swaps",
+        "config": {"throughput": 20, "max_pending": 60}
+      }
+    ]
+  },
   "participants": [
     {
       "el_type": "geth",
