@@ -33,9 +33,10 @@ jobs:
       # Install the Kurtosis CLI
       - name: Install kurtosis
         run: |
-          curl -LsSf https://github.com/kurtosis-tech/kurtosis-cli-release-artifacts/releases/latest/download/kurtosis-cli-linux-amd64 -o kurtosis
-          chmod +x kurtosis
-          sudo mv kurtosis /usr/local/bin/
+          LATEST=$(curl -s https://api.github.com/repos/kurtosis-tech/kurtosis-cli-release-artifacts/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
+          curl -LsSf "https://github.com/kurtosis-tech/kurtosis-cli-release-artifacts/releases/latest/download/kurtosis-cli_${LATEST}_linux_amd64.tar.gz" -o kurtosis.tar.gz
+          tar -xzf kurtosis.tar.gz
+          sudo install -m 755 "$(find . -maxdepth 2 -name kurtosis -type f | head -1)" /usr/local/bin/kurtosis
           kurtosis version
 
       # Launch the devnet
