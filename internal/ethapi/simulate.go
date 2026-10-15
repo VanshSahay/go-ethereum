@@ -394,7 +394,12 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	}
 
 	// Process EIP-7685 requests; EIP-8304 tables are nil here, wired in a later PR
-	requests, bal, err := core.PostExecution(ctx, sim.chainConfig, header.Number, header.Time, allLogs, nil, evm, uint32(len(block.Calls)+1))
+	// EIP-8304: stateless level-0 index root, exact for single-block simulation.
+	var tablesToWrite []core.TableWrite
+	if sim.chainConfig.IsAmsterdam(header.Number, header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+		tablesToWrite = core.BuildLogIndexForBlock(header.Number.Uint64(), header.ParentHash, receipts)
+	}
+	requests, bal, err := core.PostExecution(ctx, sim.chainConfig, header.Number, header.Time, allLogs, tablesToWrite, evm, uint32(len(block.Calls)+1))
 	if err != nil {
 		return nil, nil, nil, err
 	}

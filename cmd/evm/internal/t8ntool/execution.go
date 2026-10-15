@@ -363,7 +363,9 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, 
 	for _, receipt := range receipts {
 		allLogs = append(allLogs, receipt.Logs...)
 	}
-	// EIP-8304: log index tables are not built by t8n, wired in a later PR
+	// EIP-8304: the level-0 index table root commits to the parent block
+	// hash, which the transition tool environment does not carry; computing
+	// it needs an env schema extension, so t8n passes no tables for now.
 	requests, bal, err := core.PostExecution(context.Background(), chainConfig, vmContext.BlockNumber, vmContext.Time, allLogs, nil, evm, uint32(len(receipts)+1))
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("failed to process post-execution: %v", err))
