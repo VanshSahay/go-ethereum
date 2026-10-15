@@ -421,6 +421,18 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 }
 
 // StateAt returns a new mutable state based on a particular point in time.
+// StateProverAt returns a StateDB at the given header backed by proof maps:
+// every trie node and contract code read through it is recorded, collecting
+// exactly the witness needed to reconstruct the state without the database.
+func (bc *BlockChain) StateProverAt(header *types.Header, proofNodes, proofCodes map[common.Hash][]byte) (*state.StateDB, error) {
+	proofDb := bc.triedb.NewProofWriter(proofNodes)
+	codeDb := state.NewProofCodeWriter(bc.db, proofCodes)
+	if bc.chainConfig.IsUBT(header.Number, header.Time) {
+		return state.New(header.Root, state.NewUBTDatabase(proofDb, codeDb))
+	}
+	return state.New(header.Root, state.NewMPTDatabase(proofDb, codeDb))
+}
+
 func (bc *BlockChain) StateAt(header *types.Header) (*state.StateDB, error) {
 	if bc.chainConfig.IsUBT(header.Number, header.Time) {
 		return state.New(header.Root, state.NewUBTDatabase(bc.triedb, bc.codedb))

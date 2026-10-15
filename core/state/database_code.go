@@ -71,8 +71,9 @@ func (c *codeCache) Put(hash common.Hash, code []byte) {
 //
 // Reader is safe for concurrent access.
 type CodeReader struct {
-	db    ethdb.KeyValueReader
-	cache *codeCache
+	db         ethdb.KeyValueReader
+	cache      *codeCache
+	proofCodes map[common.Hash][]byte
 
 	// Cache statistics
 	hit       atomic.Int64 // Number of code lookups found in the cache
@@ -86,6 +87,25 @@ func newCodeReader(db ethdb.KeyValueReader, cache *codeCache) *CodeReader {
 	return &CodeReader{
 		db:    db,
 		cache: cache,
+	}
+}
+
+// NewProofCodeReader constructs a code database backed exclusively by the
+// given code map.
+func NewProofCodeReader(proofCodes map[common.Hash][]byte) *CodeDB {
+	return &CodeDB{
+		cache:      newCodeCache(),
+		proofCodes: proofCodes,
+	}
+}
+
+// NewProofCodeWriter wraps an existing code database so that every code read
+// through it is recorded into the proof map.
+func NewProofCodeWriter(db ethdb.KeyValueStore, proofCodes map[common.Hash][]byte) *CodeDB {
+	return &CodeDB{
+		db:         db,
+		cache:      newCodeCache(),
+		proofCodes: proofCodes,
 	}
 }
 
@@ -110,6 +130,15 @@ func (r *CodeReader) Code(addr common.Address, codeHash common.Hash) []byte {
 	if len(code) > 0 {
 		r.cache.Put(codeHash, code)
 		r.missBytes.Add(int64(len(code)))
+		if r.proofCodes != nil {
+			if _, ok := r.proofCodes[codeHash]; !ok {
+				r.proofCodes[codeHash] = code
+			}
+		}
+		return code
+	}
+	if r.proofCodes != nil {
+		return r.proofCodes[codeHash]
 	}
 	return code
 }
@@ -203,8 +232,9 @@ func (b *CodeBatch) Commit() error {
 // CodeDB is responsible for managing the contract code and provides the access
 // to it. It can be used as a global object, sharing it between multiple entities.
 type CodeDB struct {
-	db    ethdb.KeyValueStore
-	cache *codeCache
+	db         ethdb.KeyValueStore
+	cache      *codeCache
+	proofCodes map[common.Hash][]byte // optional code set for proof-backed databases
 }
 
 // NewCodeDB constructs the contract code database with the provided key value store.
@@ -217,7 +247,9 @@ func NewCodeDB(db ethdb.KeyValueStore) *CodeDB {
 
 // Reader returns the contract code reader.
 func (d *CodeDB) Reader() *CodeReader {
-	return newCodeReader(d.db, d.cache)
+	r := newCodeReader(d.db, d.cache)
+	r.proofCodes = d.proofCodes
+	return r
 }
 
 // NewBatch returns the batch for flushing contract codes.

@@ -26,12 +26,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // Table levels and sizes per the EIP-8304 spec: five chained table levels,
 // level i covering TableSizes[i] consecutive blocks.
 var TableSizes = []uint64{1, 4, 16, 64, 256}
+
+// MaxTopicCount is the number of log topic entry types per log.
+const MaxTopicCount = 4
 
 // ErrTableDeleted is returned when accessing a table that has been deleted,
 // e.g. by a reorg amputation running concurrently with a merge.
@@ -209,10 +213,11 @@ type tableReaderImpl interface {
 // TableReader provides read access to a completed table, backed either by RAM
 // (memory mode) or by the table file layer.
 type TableReader struct {
-	impl       tableReaderImpl
-	EntryCount uint64
-	TableRoot  [32]byte
-	Meta       TableMeta
+	impl          tableReaderImpl
+	EntryCount    uint64
+	TableRoot     [32]byte
+	Meta          TableMeta
+	IndexContract common.Address // the index contract the table root is published in
 }
 
 // BlockRange returns the range of blocks the table indexes.
@@ -243,10 +248,11 @@ type memoryTableReader struct {
 
 func newMemoryTableReader(entries []types.IndexEntry, root [32]byte, meta TableMeta) *TableReader {
 	return &TableReader{
-		impl:       &memoryTableReader{entries: entries},
-		EntryCount: uint64(len(entries)),
-		TableRoot:  root,
-		Meta:       meta,
+		impl:          &memoryTableReader{entries: entries},
+		EntryCount:    uint64(len(entries)),
+		TableRoot:     root,
+		Meta:          meta,
+		IndexContract: params.IndexContractAddress,
 	}
 }
 
@@ -443,10 +449,11 @@ func newTableReader(p *Params, tf *tableFiles, name string) (*TableReader, error
 		fr.levelPointers[i] = int64(p)
 	}
 	return &TableReader{
-		impl:       fr,
-		EntryCount: header.EntryCount,
-		TableRoot:  header.TableRoot,
-		Meta:       header.Meta,
+		impl:          fr,
+		EntryCount:    header.EntryCount,
+		TableRoot:     header.TableRoot,
+		Meta:          header.Meta,
+		IndexContract: params.IndexContractAddress,
 	}, nil
 }
 

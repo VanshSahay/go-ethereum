@@ -300,8 +300,10 @@ func (ts *tableStorage) openAndLockTableWriter(tw tableWriterImpl) error {
 				closeTw, minCounter = tw, counter
 			}
 		}
-		if err := closeTw.(*tableWriter).close(); err != nil {
-			return err
+		if fw, ok := closeTw.(*tableWriter); ok {
+			if err := fw.close(); err != nil {
+				return err
+			}
 		}
 		delete(ts.unlockedOpenWriters, closeTw)
 	}

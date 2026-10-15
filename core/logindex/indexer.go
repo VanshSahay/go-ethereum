@@ -178,8 +178,6 @@ func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts
 		ix.recentHeads.Add(header.Hash(), &cachedBlockData{header: header, body: body, receipts: receipts, canonicalUntil: blockNumber})
 	}
 	tw, err := ix.getPartialBlockTableWriter(header)
-	if header.Number.Uint64() >= 45 && header.Number.Uint64() <= 47 {
-	}
 	ix.lock.Unlock()
 	if err == nil {
 		err = ix.processBlockTable(tw, header, body, receipts)
@@ -380,6 +378,23 @@ func (ix *Indexer) Revert(header *types.Header) {
 			bd.canonicalUntil = blockNumber
 		}
 	}
+}
+
+// GetRangeReaders returns the complete tables covering the given block range,
+// highest level first, clamped to the canonical segment of the reference head.
+func (ix *Indexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.Range[uint64]) []*TableReader {
+	ix.lock.Lock()
+	defer ix.lock.Unlock()
+
+	if refBd, ok := ix.recentHeads.Get(refBlockHash); ok {
+		if refBd.canonicalUntil < blockRange.Last() {
+			blockRange.SetLast(refBd.canonicalUntil)
+		}
+	}
+	if blockRange.IsEmpty() {
+		return nil
+	}
+	return ix.storage.getRangeReaders(blockRange)
 }
 
 // HeadBlock returns the block number of the index head.

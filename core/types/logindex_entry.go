@@ -106,6 +106,13 @@ func contentSize(typ EntryType) int {
 	}
 }
 
+// EntryContentSize returns the encoded length of the searchable content field
+// for the given entry type: 32 bytes for block, transaction and topic entries,
+// 20 bytes for address entries.
+func EntryContentSize(typ EntryType) int {
+	return contentSize(typ)
+}
+
 // entrySize returns the total encoded length of an entry of the given type.
 func entrySize(typ EntryType) int {
 	switch typ {
