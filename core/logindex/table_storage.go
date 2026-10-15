@@ -340,7 +340,7 @@ func (ts *tableStorage) finalizeTableWriter(id tableID) error {
 		}
 	} else {
 		mw := tw.(*memoryTableWriter)
-		tr = newMemoryTableReader(mw.collectedEntries(), mw.getTableRoot(), mw.meta)
+		tr = newMemoryTableReader(mw.collectedEntries(), mw.root(), mw.meta)
 	}
 	ts.readers[id] = tr
 	ts.complete.add(id)

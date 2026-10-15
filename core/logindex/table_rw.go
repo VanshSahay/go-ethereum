@@ -592,7 +592,10 @@ type tableWriterImpl interface {
 	lastAndNextEntry() (types.IndexEntry, uint64)
 	addEntry(entry types.IndexEntry) error
 	setMeta(meta TableMeta)
-	getTableRoot() [32]byte
+	// root returns the table root once every entry has been added. The file
+	// writer derives it incrementally while entries stream in; the memory
+	// writer computes it on demand.
+	root() [32]byte
 	finalize() (bool, error)
 	getPhase() uint
 	delete() error
@@ -972,7 +975,7 @@ func (tw *tableWriter) setMeta(meta TableMeta) {
 	tw.meta, tw.hasMeta = meta, true
 }
 
-func (tw *tableWriter) getTableRoot() [32]byte {
+func (tw *tableWriter) root() [32]byte {
 	if tw.nextEntry != tw.entryCountV {
 		panic("not enough entries")
 	}
@@ -1124,11 +1127,14 @@ func (tw *memoryTableWriter) setMeta(meta TableMeta) {
 	tw.meta, tw.hasMeta = meta, true
 }
 
-func (tw *memoryTableWriter) getTableRoot() [32]byte {
+func (tw *memoryTableWriter) root() [32]byte {
 	if tw.nextEntry != tw.entryCountV {
 		panic("not enough entries")
 	}
-	return tw.tableRoot
+	if tw.entryCountV > 0 {
+		return types.IndexTableRoot(tw.entries)
+	}
+	return [32]byte{}
 }
 
 func (tw *memoryTableWriter) finalize() (bool, error) {

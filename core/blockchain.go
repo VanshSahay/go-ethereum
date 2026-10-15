@@ -38,6 +38,8 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/logindex"
+
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
@@ -194,6 +196,13 @@ type BlockChainConfig struct {
 	// versions, only one version is stored in full format, while the others
 	// are stored in diff mode for storage compression.
 	NodeFullValueCheckpoint uint32
+
+	// EIP-8304 log index options. When LogIndexPath is empty the index keeps
+	// its tables in memory; indexing can be disabled entirely with
+	// LogIndexDisabled.
+	LogIndexPath     string
+	LogIndexDisabled bool
+	LogIndexHistory  uint64
 
 	// State snapshot related options
 	SnapshotLimit   int  // Memory allowance (MB) to use for caching snapshot entries in memory
@@ -367,7 +376,8 @@ type BlockChain struct {
 	engine     consensus.Engine
 	validator  Validator // Block and state validator interface
 	prefetcher Prefetcher
-	processor  Processor // Block transaction processor interface
+	processor  Processor         // Block transaction processor interface
+	logIndex   *logindex.Indexer // EIP-8304 index table producer and store, nil when disabled
 	logger     *tracing.Hooks
 
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
@@ -432,6 +442,26 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	bc.validator = NewBlockValidator(chainConfig, bc)
 	bc.prefetcher = newStatePrefetcher(chainConfig, bc.hc)
 	bc.processor = NewStateProcessor(bc.hc)
+
+	// EIP-8304 log index: memory backed unless a storage path is configured.
+	if !cfg.LogIndexDisabled {
+		var (
+			ix  *logindex.Indexer
+			err error
+		)
+		if cfg.LogIndexPath != "" {
+			ix, err = logindex.NewIndexer(logindex.DefaultParams(), logindex.Config{History: cfg.LogIndexHistory}, cfg.LogIndexPath)
+		} else {
+			ix = logindex.NewMemoryIndexer()
+		}
+		if err != nil {
+			return nil, err
+		}
+		bc.logIndex = ix
+		if sp, ok := bc.processor.(*StateProcessor); ok {
+			sp.logIndex = ix
+		}
+	}
 
 	genesisHeader := bc.GetHeaderByNumber(0)
 	if genesisHeader == nil {
@@ -1745,6 +1775,29 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	return nil
 }
 
+// LogIndex returns the EIP-8304 log index of the chain, or nil when indexing
+// is disabled.
+func (bc *BlockChain) LogIndex() *logindex.Indexer {
+	return bc.logIndex
+}
+
+// indexBlock feeds a newly canonical block to the log index, rewinding it
+// first when the feed moved the index head backwards or onto another fork.
+func (bc *BlockChain) indexBlock(block *types.Block, receipts []*types.Receipt) {
+	if bc.logIndex == nil {
+		return
+	}
+	if n := bc.logIndex.HeadBlock(); block.NumberU64() < n ||
+		(block.NumberU64() == n && bc.logIndex.HeadHash() != block.Hash()) {
+		bc.logIndex.Revert(block.Header())
+	}
+	var body *types.Body
+	if b := bc.GetBlock(block.Hash(), block.NumberU64()); b != nil {
+		body = b.Body()
+	}
+	bc.logIndex.AddBlockData(block.Header(), body, receipts)
+}
+
 // writeBlockAndSetHead is the internal implementation of WriteBlockAndSetHead.
 // This function expects the chain mutex to be held.
 func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types.Receipt, logs []*types.Log, state *state.StateDB, emitHeadEvent bool) (status WriteStatus, err error) {
@@ -1762,6 +1815,8 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 
 	// Set new head.
 	bc.writeHeadBlock(block)
+
+	bc.indexBlock(block, receipts)
 
 	bc.chainFeed.Send(ChainEvent{
 		Header:       block.Header(),

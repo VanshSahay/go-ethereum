@@ -219,8 +219,20 @@ func (p *StateProcessor) processParallel(ctx context.Context, block *types.Block
 	if precompileCache != nil {
 		postEVM.SetPrecompileCache(precompileCache)
 	}
-	// EIP-8304: log index tables are not built on the parallel path, wired in a later PR
-	requests, postBAL, err := PostExecution(ctx, config, header.Number, header.Time, allLogs, nil, postEVM, postIndex)
+	// EIP-8304: build the index table roots committed by this block; when no
+	// index producer is attached only the stateless level-0 root is computed.
+	var tablesToWrite []TableWrite
+	if config.IsAmsterdam(header.Number, header.Time) && postEVM.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+		if p.logIndex != nil {
+			tablesToWrite, err = p.logIndex.TableWritesForBlock(header.Number.Uint64(), header.ParentHash, receipts)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			tablesToWrite = BuildLogIndexForBlock(header.Number.Uint64(), header.ParentHash, receipts)
+		}
+	}
+	requests, postBAL, err := PostExecution(ctx, config, header.Number, header.Time, allLogs, tablesToWrite, postEVM, postIndex)
 	postEVM.Release()
 	if err != nil {
 		return nil, err

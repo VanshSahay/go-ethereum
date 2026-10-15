@@ -18,23 +18,18 @@ package core
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
 // TableWrite describes a table root that should be written to the index contract.
-type TableWrite struct {
-	FirstBlock uint64
-	TableSize  uint64
-	Root       common.Hash
-}
+type TableWrite = logindex.TableWrite
 
 // BuildLogIndexForBlock builds the EIP-8304 level-0 log index table for the given
-// block. parentHash is the hash of the parent block, whose block entry is added
-// with the spec's one-block delay (none for the genesis block). The table root
-// is the SHA2-256 binary tree hash of the sorted entries with the entry count
-// mixed in (see core/types/logindex_merkle.go).
+// block without any indexer state. parentHash is the hash of the parent block,
+// whose block entry is added with the spec's one-block delay (none for the
+// genesis block). The table root is the SHA2-256 binary tree hash of the sorted
+// entries with the entry count mixed in (see core/types/logindex_merkle.go).
 func BuildLogIndexForBlock(blockNumber uint64, parentHash common.Hash, receipts types.Receipts) []TableWrite {
-	b0 := types.NewIndexBuilder()
-	b0.AddBlockEntries(parentHash, blockNumber, receipts)
-	return []TableWrite{{FirstBlock: blockNumber, TableSize: 1, Root: b0.Build()}}
+	return []TableWrite{{FirstBlock: blockNumber, TableSize: 1, Root: logindex.BuildLevel0Root(blockNumber, parentHash, receipts)}}
 }

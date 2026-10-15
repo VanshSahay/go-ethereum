@@ -223,12 +223,20 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 		allLogs = append(allLogs, r.Logs...)
 	}
 
-	// EIP-8304: build log index tables for the system call inside PostExecution.
-	// No-op before the fork activates or when the contract is not deployed
-	// (non-dev chains).
+	// EIP-8304: build the index table roots committed by this block. No-op
+	// before the fork activates or when the contract is not deployed
+	// (non-dev chains). The chain's index producer runs the full publication
+	// schedule; without an index only the stateless level-0 root is computed.
 	var tablesToWrite []core.TableWrite
 	if miner.chainConfig.IsAmsterdam(work.header.Number, work.header.Time) && work.evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		tablesToWrite = core.BuildLogIndexForBlock(work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
+		if ix := miner.chain.LogIndex(); ix != nil {
+			tablesToWrite, err = ix.TableWritesForBlock(work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
+			if err != nil {
+				return &newPayloadResult{err: err}
+			}
+		} else {
+			tablesToWrite = core.BuildLogIndexForBlock(work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
+		}
 	}
 
 	// Collect consensus-layer requests if Prague is enabled.

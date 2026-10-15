@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -326,8 +327,14 @@ func (b *BlockGen) collectRequests(readonly bool) (requests [][]byte, bal *bal.C
 	blockContext := NewEVMBlockContext(b.header, b.cm, &b.header.Coinbase)
 	evm := vm.NewEVM(blockContext, statedb, b.cm.config, vm.Config{})
 
-	// EIP-8304: log index tables are not built for test chains, wired in a later PR
-	requests, bal, err := PostExecution(context.Background(), b.cm.config, b.header.Number, b.header.Time, blockLogs, nil, evm, uint32(len(b.txs)+1))
+	// EIP-8304: the level-0 index table root is stateless and exact for
+	// single-block generation; higher-level publications need the maintained
+	// table state and are handled by the chain-level index producer.
+	var tablesToWrite []TableWrite
+	if b.cm.config.IsAmsterdam(b.header.Number, b.header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+		tablesToWrite = BuildLogIndexForBlock(b.header.Number.Uint64(), b.header.ParentHash, b.receipts)
+	}
+	requests, bal, err := PostExecution(context.Background(), b.cm.config, b.header.Number, b.header.Time, blockLogs, tablesToWrite, evm, uint32(len(b.txs)+1))
 	if err != nil {
 		panic(fmt.Sprintf("failed to run post-execution: %v", err))
 	}
@@ -491,6 +498,12 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		// Re-expand to ensure all receipts are returned.
 		receipts = receipts[:receiptsCount]
 
+		// EIP-8304: index the generated block so its post-execution system
+		// calls match a re-import of the same chain.
+		if cm.logIndex != nil {
+			cm.logIndex.AddBlockData(block.Header(), block.Body(), receipts)
+		}
+
 		// Advance the chain.
 		cm.add(block, receipts)
 		parent = block
@@ -596,6 +609,7 @@ type chainMaker struct {
 	chain       []*types.Block
 	chainByHash map[common.Hash]*types.Block
 	receipts    []types.Receipts
+	logIndex    *logindex.Indexer
 }
 
 func newChainMaker(bottom *types.Block, config *params.ChainConfig, engine consensus.Engine) *chainMaker {
@@ -603,6 +617,7 @@ func newChainMaker(bottom *types.Block, config *params.ChainConfig, engine conse
 		bottom:      bottom,
 		config:      config,
 		engine:      engine,
+		logIndex:    logindex.NewMemoryIndexer(),
 		chainByHash: make(map[common.Hash]*types.Block),
 	}
 }

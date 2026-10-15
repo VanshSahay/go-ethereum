@@ -249,6 +249,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			BinTrieGroupDepth:       config.BinTrieGroupDepth,
 			StateScheme:             scheme,
 			HistoryPolicy:           histPolicy,
+			LogIndexPath:            stack.ResolvePath("logindex"),
+			LogIndexDisabled:        config.LogNoHistory,
+			LogIndexHistory:         config.LogHistory,
 			TxLookupLimit:           int64(min(config.TransactionHistory, math.MaxInt64)),
 			VmConfig: vm.Config{
 				EnablePreimageRecording: config.EnablePreimageRecording,

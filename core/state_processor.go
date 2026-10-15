@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -43,7 +44,8 @@ import (
 //
 // StateProcessor implements Processor.
 type StateProcessor struct {
-	chain ChainContext // Chain context interface
+	chain    ChainContext      // Chain context interface
+	logIndex *logindex.Indexer // optional EIP-8304 index table producer
 }
 
 // NewStateProcessor initialises a new StateProcessor.
@@ -132,11 +134,22 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 		blockAccessList.Merge(bal)
 		spanEnd(nil)
 	}
-	// EIP-8304: build the level-0 log index table root. No-op before the fork
-	// activates or when the contract is not deployed (non-dev chains).
+	// EIP-8304: build the index table roots committed by this block. No-op
+	// before the fork activates or when the contract is not deployed (non-dev
+	// chains). With an index producer attached the full publication schedule
+	// runs (level-0 plus any due higher-level table); without one only the
+	// stateless level-0 root is computed.
 	var tablesToWrite []TableWrite
 	if config.IsAmsterdam(block.Number(), block.Time()) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		tablesToWrite = BuildLogIndexForBlock(block.Number().Uint64(), block.ParentHash(), receipts)
+		if p.logIndex != nil {
+			var err error
+			tablesToWrite, err = p.logIndex.TableWritesForBlock(block.Number().Uint64(), block.ParentHash(), receipts)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			tablesToWrite = BuildLogIndexForBlock(block.Number().Uint64(), block.ParentHash(), receipts)
+		}
 	}
 	requests, bal, err := PostExecution(ctx, config, block.Number(), block.Time(), allLogs, tablesToWrite, evm, uint32(len(block.Transactions())+1))
 	if err != nil {

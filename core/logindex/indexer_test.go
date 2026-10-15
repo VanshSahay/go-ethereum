@@ -320,7 +320,7 @@ func TestEmptyTableWriter(t *testing.T) {
 	if err != nil || !done {
 		t.Fatalf("finalize = %v, %v", done, err)
 	}
-	if tw.getTableRoot() != ([32]byte{}) {
-		t.Errorf("empty table root = %x, want the zero hash", tw.getTableRoot())
+	if tw.root() != ([32]byte{}) {
+		t.Errorf("empty table root = %x, want the zero hash", tw.root())
 	}
 }

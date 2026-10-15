@@ -155,17 +155,31 @@ func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts
 		return
 	}
 	blockNumber := header.Number.Uint64()
-	if blockNumber >= ix.headBlock {
+	switch {
+	case blockNumber < ix.headBlock || (blockNumber == ix.headBlock && ix.headBlockHash != header.Hash()):
+		// Canonical head moved (reorg): rewind and amputate every table
+		// covering the reorg height or beyond, inclusive — the table at the
+		// reorg height itself belongs to the old fork.
+		ix.headBlock = blockNumber
+		ix.headBlockHash = header.Hash()
+		ix.storage.deleteTablesFromBlock(blockNumber)
+		ix.recentHeads.Add(header.Hash(), &cachedBlockData{header: header, body: body, receipts: receipts, canonicalUntil: blockNumber})
+		for _, key := range ix.recentHeads.Keys() {
+			if bd, _ := ix.recentHeads.Get(key); bd.canonicalUntil > blockNumber {
+				bd.canonicalUntil = blockNumber
+			}
+		}
+	case blockNumber == ix.headBlock && ix.headBlockHash == header.Hash():
+		ix.lock.Unlock()
+		return // already indexed
+	default:
 		ix.headBlock = blockNumber
 		ix.headBlockHash = header.Hash()
 		ix.recentHeads.Add(header.Hash(), &cachedBlockData{header: header, body: body, receipts: receipts, canonicalUntil: blockNumber})
 	}
-	if blockNumber < ix.headBlock {
-		// unexpected block, do not create table
-		ix.lock.Unlock()
-		return
-	}
 	tw, err := ix.getPartialBlockTableWriter(header)
+	if header.Number.Uint64() >= 45 && header.Number.Uint64() <= 47 {
+	}
 	ix.lock.Unlock()
 	if err == nil {
 		err = ix.processBlockTable(tw, header, body, receipts)
@@ -187,15 +201,15 @@ func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts
 func (ix *Indexer) getPartialBlockTableWriter(header *types.Header) (tableWriterImpl, error) {
 	var tw tableWriterImpl
 	if ix.hasProcessedBlock && ix.processedBlockNumber == header.Number.Uint64() {
+		// A missing pending writer (e.g. removed by a concurrent scheduling
+		// round) is benign: the table content is deterministic from the
+		// delivered block data, so the rebuild path reconstructs it.
 		if header.Hash() == ix.processedBlockId {
-			var err error
-			if tw, err = ix.storage.getTableWriter(tableID{level: 0, index: ix.processedBlockNumber}); err != nil {
-				return nil, err
+			if tw, err := ix.storage.getTableWriter(tableID{level: 0, index: ix.processedBlockNumber}); err == nil {
+				return tw, nil
 			}
-		} else {
-			if err := ix.storage.deleteTable(tableID{level: 0, index: ix.processedBlockNumber}); err != nil {
-				return nil, err
-			}
+		} else if err := ix.storage.deleteTable(tableID{level: 0, index: ix.processedBlockNumber}); err != nil && err != errTableNotFound {
+			return nil, err
 		}
 		ix.hasProcessedBlock = false
 	}
@@ -235,14 +249,19 @@ func (ix *Indexer) processBlockTable(tw tableWriterImpl, header *types.Header, b
 		LastBlockHash:   header.Hash(),
 		ParentHash:      header.ParentHash,
 	})
-	for {
-		done, err := tw.finalize()
-		if err != nil {
-			ix.storage.deleteTable(id)
-			return err
-		}
-		if done {
-			break
+	// A writer created by the processing path is already finalized (its root
+	// was needed for the in-block system call); only a rebuilt one needs the
+	// finalize loop here.
+	if tw.getPhase() != wpFinalized {
+		for {
+			done, err := tw.finalize()
+			if err != nil {
+				ix.storage.deleteTable(id)
+				return err
+			}
+			if done {
+				break
+			}
 		}
 	}
 	return ix.storage.finalizeTableWriter(id)
@@ -256,8 +275,27 @@ func (ix *Indexer) updateTableOperations() {
 		ix.deliverInitBlock()
 		return
 	}
+	// Protect the pending process-time table from the scheduler: the index
+	// head has not advanced past its block yet, so it looks unrequired and
+	// would be scheduled for deletion while the block awaits insertion.
+	var pending tableID
+	pendingProtected := ix.hasProcessedBlock
+	if pendingProtected {
+		pending = tableID{level: 0, index: ix.processedBlockNumber}
+		partialSet[0] = partialSet[0].Difference(common.SingleRangeSet[uint64](common.NewRange[uint64](pending.index, 1)))
+	}
 	targetSet := ix.makeTargetSet(completeSet)
 	tableOps, _ := ix.params.nextTableOperations(completeSet, partialSet, targetSet, ix.mergeThreads, ix.mergeThreads)
+	if pendingProtected {
+		filtered := tableOps[:0]
+		for _, op := range tableOps {
+			if op.operation == opDelete && op.id == pending {
+				continue
+			}
+			filtered = append(filtered, op)
+		}
+		tableOps = filtered
+	}
 	updateOps := make([]bool, ix.mergeThreads)
 	for i, co := range ix.currentOps {
 		var found bool
@@ -342,6 +380,20 @@ func (ix *Indexer) Revert(header *types.Header) {
 			bd.canonicalUntil = blockNumber
 		}
 	}
+}
+
+// HeadBlock returns the block number of the index head.
+func (ix *Indexer) HeadBlock() uint64 {
+	ix.lock.Lock()
+	defer ix.lock.Unlock()
+	return ix.headBlock
+}
+
+// HeadHash returns the block hash of the index head.
+func (ix *Indexer) HeadHash() common.Hash {
+	ix.lock.Lock()
+	defer ix.lock.Unlock()
+	return ix.headBlockHash
 }
 
 func (ix *Indexer) tailBlock() uint64 {
