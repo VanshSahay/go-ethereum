@@ -19,6 +19,8 @@ package types
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
+	"math/bits"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -34,6 +36,71 @@ var zeroHashes = func() (ladder [64][32]byte) {
 	}
 	return ladder
 }()
+
+// MerkleZeroHash returns the hash of an empty subtree of the given height in
+// the index table tree.
+func MerkleZeroHash(level int) [32]byte {
+	return zeroHashes[level]
+}
+
+// EntryLeafHash returns the tree leaf of a single index entry: the SHA2-256
+// hash of its binary encoding.
+func EntryLeafHash(entry IndexEntry) common.Hash {
+	return common.Hash(sha256.Sum256(entry))
+}
+
+// IndexTableRoot returns the EIP-8304 table root over the given sorted
+// entries: the binary tree hash with the little-endian entry count mixed in.
+func IndexTableRoot(entries []IndexEntry) common.Hash {
+	return merkleizeEntries(entries)
+}
+
+// MerkleNodeHash returns the hash of the tree node at global tree index gti of
+// the binary tree over the given sorted entries: the root is at index 1,
+// leaves at indices 2^h + i where h = ceil(log2(n)) and zero subtrees pad the
+// leaf array up to 2^h. This is the un-mixed tree node used by Merkle proofs;
+// the table root additionally mixes in the entry count (see IndexTableRoot).
+func MerkleNodeHash(entries []IndexEntry, gti uint64) ([32]byte, error) {
+	n := uint64(len(entries))
+	if n == 0 {
+		return [32]byte{}, errors.New("empty entry list has no tree")
+	}
+	h := uint(64 - bits.LeadingZeros64(n-1))
+	return merkleNodeHash(entries, n, h, gti)
+}
+
+func merkleNodeHash(entries []IndexEntry, n uint64, h uint, gti uint64) ([32]byte, error) {
+	if gti == 0 {
+		return [32]byte{}, errors.New("invalid tree index 0")
+	}
+	gtiHeight := uint(63 - bits.LeadingZeros64(gti))
+	if gtiHeight > h {
+		return [32]byte{}, errors.New("tree index below leaf level")
+	}
+	leafOffset := uint64(1) << h
+	// First leaf position covered by this node, in entry index space.
+	start := (gti << (h - gtiHeight)) - leafOffset
+	if start >= n {
+		return zeroHashes[h-gtiHeight], nil
+	}
+	if gtiHeight == h {
+		return EntryLeafHash(entries[start]), nil
+	}
+	left, err := merkleNodeHash(entries, n, h, gti*2)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	right, err := merkleNodeHash(entries, n, h, gti*2+1)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	hasher := sha256.New()
+	hasher.Write(left[:])
+	hasher.Write(right[:])
+	var result [32]byte
+	hasher.Sum(result[:0])
+	return result, nil
+}
 
 // merkleizeEntries computes the EIP-8304 index table root. Per the spec, the
 // root is "calculated as the root of the List[Hash32, entry_count] SSZ list
