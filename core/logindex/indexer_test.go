@@ -73,6 +73,23 @@ func testReceipts(block uint64) types.Receipts {
 	return receipts
 }
 
+// kickIndexer drives the indexer past startup validation and schedules the
+// first operations, standing in for the chain feed after a restart.
+func kickIndexer(t *testing.T, ix *Indexer) {
+	t.Helper()
+	ix.lock.Lock()
+	defer ix.lock.Unlock()
+	for range 100 {
+		_, _, initPhase := ix.storage.tables()
+		if !initPhase {
+			ix.updateTableOperations()
+			return
+		}
+		ix.deliverInitBlock()
+	}
+	t.Fatal("indexer startup validation did not complete")
+}
+
 // waitIdle blocks until the indexer is quiescent: no operation is running or
 // scheduled, no partial writers remain, and the scheduler has no more work.
 func waitIdle(t *testing.T, ix *Indexer) {
@@ -88,7 +105,7 @@ func waitIdle(t *testing.T, ix *Indexer) {
 		}
 		pending := !idle
 		if idle {
-			complete, partial := ix.storage.tablesLocked()
+			complete, partial, _ := ix.storage.tablesLocked()
 			if !partial.isEmpty() {
 				pending = true
 			} else {
@@ -240,7 +257,7 @@ func TestSchedulerConvergence(t *testing.T) {
 	// index 0 contains the genesis block and is never built; the last range
 	// at each level is incomplete at 600 blocks.
 	ix.lock.Lock()
-	complete, _ := ix.storage.tablesLocked()
+	complete, _, _ := ix.storage.tablesLocked()
 	ix.lock.Unlock()
 	wantCounts := map[int]uint64{1: 149, 2: 36, 3: 8, 4: 1}
 	for level := 1; level <= 4; level++ {
@@ -273,7 +290,7 @@ func TestReorgAmputation(t *testing.T) {
 	waitIdle(t, ix)
 
 	ix.lock.Lock()
-	complete, _ := ix.storage.tablesLocked()
+	complete, _, _ := ix.storage.tablesLocked()
 	ix.lock.Unlock()
 	covered := make(map[uint64]bool)
 	for level := range TableSizes {

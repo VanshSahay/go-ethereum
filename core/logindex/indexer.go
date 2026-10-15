@@ -34,6 +34,11 @@ const (
 type Config struct {
 	History  uint64 // number of historical blocks to index
 	Disabled bool   // disables indexing completely
+
+	// BlockHashAt optionally returns the canonical hash of a block number,
+	// used to validate persisted tables against the chain after a restart.
+	// When nil, unvalidated tables are dropped on startup.
+	BlockHashAt func(uint64) common.Hash
 }
 
 // Indexer builds and maintains the EIP-8304 index table hierarchy for the
@@ -44,6 +49,7 @@ type Indexer struct {
 	params       *Params
 	config       Config
 	storage      *tableStorage
+	files        *tableFiles // nil in memory mode
 	mergeThreads int
 
 	currentOps           []tableOperation
@@ -69,13 +75,41 @@ type cachedBlockData struct {
 }
 
 // NewMemoryIndexer creates an indexer that keeps all tables in RAM. Used by
-// tests, chain generation and the parallel state processor; the file backed
-// constructor is added with persistent storage.
+// tests, chain generation and the parallel state processor.
 func NewMemoryIndexer() *Indexer {
 	params := DefaultParams()
+	return newIndexer(params, Config{}, nil, newTableStorage(params))
+}
+
+// NewIndexer creates a file backed indexer storing tables under path and
+// reloading any tables persisted there by a previous run. The indexer head is
+// restored from the loaded tables so the scheduler cannot mistake the indexed
+// range for untargeted; the startup validation may still rewind it if the
+// newest tables fail the chain-of-custody check.
+func NewIndexer(params *Params, config Config, path string) (*Indexer, error) {
+	files, err := newTableFiles(path, 2000000000, 96)
+	if err != nil {
+		return nil, err
+	}
+	storage, err := newTableStorageFromFiles(params, files)
+	if err != nil {
+		files.close()
+		return nil, err
+	}
+	ix := newIndexer(params, config, files, storage)
+	if number, hash, found := storage.maxLastBlock(); found {
+		ix.headBlock = number
+		ix.headBlockHash = hash
+	}
+	return ix, nil
+}
+
+func newIndexer(params *Params, config Config, files *tableFiles, storage *tableStorage) *Indexer {
 	ix := &Indexer{
 		params:        params,
-		storage:       newTableStorage(params),
+		config:        config,
+		storage:       storage,
+		files:         files,
 		mergeThreads:  maxMergeThreads,
 		currentOps:    make([]tableOperation, maxMergeThreads),
 		recentHeads:   lru.NewCache[common.Hash, *cachedBlockData](headCacheSize),
@@ -89,6 +123,21 @@ func NewMemoryIndexer() *Indexer {
 		go ix.mergeLoop(i)
 	}
 	return ix
+}
+
+// deliverInitBlock performs the startup chain-of-custody validation of the
+// persisted tables. needs ix.lock.
+func (ix *Indexer) deliverInitBlock() {
+	number, request := ix.storage.requestInitBlockHash()
+	if !request {
+		return
+	}
+	if ix.config.BlockHashAt == nil {
+		log.Warn("Dropping unvalidated index tables: no block hash source configured")
+		ix.storage.dropPreInit()
+		return
+	}
+	ix.storage.deliverInitBlockHash(number, ix.config.BlockHashAt(number))
 }
 
 // AddBlockData indexes a block that has become part of the canonical chain. If
@@ -135,8 +184,8 @@ func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts
 // processing, if any. A writer whose block id does not match the actual header
 // (superseded proposal) is deleted so the table is rebuilt from the delivered
 // data.
-func (ix *Indexer) getPartialBlockTableWriter(header *types.Header) (*tableWriter, error) {
-	var tw *tableWriter
+func (ix *Indexer) getPartialBlockTableWriter(header *types.Header) (tableWriterImpl, error) {
+	var tw tableWriterImpl
 	if ix.hasProcessedBlock && ix.processedBlockNumber == header.Number.Uint64() {
 		if header.Hash() == ix.processedBlockId {
 			var err error
@@ -155,11 +204,11 @@ func (ix *Indexer) getPartialBlockTableWriter(header *types.Header) (*tableWrite
 
 // processBlockTable finalizes the pending level-0 writer or builds the table
 // from the given block data.
-func (ix *Indexer) processBlockTable(tw *tableWriter, header *types.Header, body *types.Body, receipts types.Receipts) error {
+func (ix *Indexer) processBlockTable(tw tableWriterImpl, header *types.Header, body *types.Body, receipts types.Receipts) error {
 	blockNumber := header.Number.Uint64()
 	id := tableID{level: 0, index: blockNumber}
 	if tw == nil {
-		complete, partial := ix.storage.tables()
+		complete, partial, _ := ix.storage.tables()
 		if partial.includes(id) {
 			if err := ix.storage.deleteTable(id); err != nil {
 				return err
@@ -202,7 +251,11 @@ func (ix *Indexer) processBlockTable(tw *tableWriter, header *types.Header, body
 // updateTableOperations re-runs the merge scheduler and wakes the merge loop
 // when the scheduled operations changed.
 func (ix *Indexer) updateTableOperations() {
-	completeSet, partialSet := ix.storage.tables()
+	completeSet, partialSet, initPhase := ix.storage.tables()
+	if initPhase {
+		ix.deliverInitBlock()
+		return
+	}
 	targetSet := ix.makeTargetSet(completeSet)
 	tableOps, _ := ix.params.nextTableOperations(completeSet, partialSet, targetSet, ix.mergeThreads, ix.mergeThreads)
 	updateOps := make([]bool, ix.mergeThreads)
@@ -339,4 +392,8 @@ func (ix *Indexer) Stop() {
 		}
 	}
 	ix.mergeWg.Wait()
+	if ix.files != nil {
+		ix.storage.close()
+		ix.files.close()
+	}
 }

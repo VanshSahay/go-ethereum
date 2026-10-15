@@ -117,7 +117,7 @@ func (ix *Indexer) mergeTable(id tableID, stopFn func() bool) (finalized bool, f
 			}
 		}
 	}()
-	if tw.entryCount != entryCount {
+	if tw.entryCount() != entryCount {
 		return false, errors.New("entry count mismatch")
 	}
 	lastEntry, nextEntry := tw.lastAndNextEntry()
