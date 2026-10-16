@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -418,6 +419,10 @@ func (b *backendMock) Engine() consensus.Engine { return nil }
 
 func (b *backendMock) CurrentView() *filtermaps.ChainView           { return nil }
 func (b *backendMock) NewMatcherBackend() filtermaps.MatcherBackend { return nil }
+func (b *backendMock) LogIndexMatcher() *logquery.Matcher           { return nil }
+func (b *backendMock) LogIndexChainView(refHeader *types.Header) logquery.ChainView {
+	return nil
+}
 
 func (b *backendMock) HistoryPruningCutoff() uint64       { return 0 }
 func (b *backendMock) HistoryRetention() HistoryRetention { return HistoryRetention{} }

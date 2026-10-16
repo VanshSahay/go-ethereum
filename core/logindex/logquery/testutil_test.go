@@ -23,9 +23,9 @@ func (m *memoryIndexer) AddBlockData(header *types.Header, body *types.Body, rec
 	m.ix.AddBlockData(header, body, receipts)
 }
 
-func (m *memoryIndexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.Range[uint64]) []*logindex.TableReader {
+func (m *memoryIndexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.Range[uint64], publishedBefore uint64) []*logindex.TableReader {
 	// refBlockHash is not used in memory mode (no persisted state validation)
-	return m.ix.GetRangeReaders(refBlockHash, blockRange)
+	return m.ix.GetRangeReaders(refBlockHash, blockRange, publishedBefore)
 }
 
 var _ = common.Hash{}

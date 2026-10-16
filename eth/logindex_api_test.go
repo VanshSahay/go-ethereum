@@ -1,0 +1,211 @@
+// Copyright 2026 The go-ethereum Authors
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package eth
+
+import (
+	"context"
+	"encoding/json"
+	"math/big"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/consensus/beacon"
+	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/logindex/logquery"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rpc"
+)
+
+var (
+	apiEmitterCode = common.FromHex("60015f5fa060025f5fa060035f5fa000") // three LOG0 events per call
+	apiKey, _      = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	apiSender      = crypto.PubkeyToAddress(apiKey.PublicKey)
+)
+
+// newAPIChain builds an indexed chain with the emitter contract deployed and
+// the API backend wired to it.
+func newAPIChain(t *testing.T, blocks int, disableIndex bool) (*core.BlockChain, *EthAPIBackend, common.Address) {
+	t.Helper()
+	config := *params.MergedTestChainConfig
+	if !disableIndex {
+		// a disabled index cannot produce the index system calls the chain
+		// maker would emit for an Amsterdam chain
+		config.AmsterdamTime = new(uint64)
+	}
+	alloc := core.SystemContractAllocs()
+	alloc[params.IndexContractAddress] = types.Account{Nonce: 1, Code: params.IndexContractCode}
+	emitterAddr := crypto.CreateAddress(apiSender, 1)
+	alloc[emitterAddr] = types.Account{Code: apiEmitterCode}
+	alloc[apiSender] = types.Account{Balance: new(big.Int).Lsh(big.NewInt(1), 60)}
+	genesis := &core.Genesis{Config: &config, Alloc: alloc}
+	engine := beacon.New(ethash.NewFaker())
+	chainConfig := &core.BlockChainConfig{LogIndexDisabled: disableIndex}
+	bc, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), genesis, engine, chainConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { bc.Stop() })
+	_, genBlocks, _ := core.GenerateChainWithGenesis(genesis, engine, blocks, func(i int, gen *core.BlockGen) {
+		signer := types.LatestSigner(&config)
+		tx, _ := types.SignNewTx(apiKey, signer, &types.LegacyTx{
+			Nonce:    uint64(i),
+			To:       &emitterAddr,
+			Gas:      100_000,
+			GasPrice: new(big.Int).Add(gen.BaseFee(), big.NewInt(1)),
+		})
+		gen.AddTx(tx)
+	})
+	if _, err := bc.InsertChain(genBlocks); err != nil {
+		t.Fatalf("insert chain: %v", err)
+	}
+	backend := &EthAPIBackend{eth: &Ethereum{blockchain: bc}}
+	return bc, backend, emitterAddr
+}
+
+// TestPurethGetLogsWithProof runs a proven query through the RPC API, verifies
+// the JSON-encoded proof independently and cross-checks the result against a
+// brute-force scan of the local receipts.
+func TestPurethGetLogsWithProof(t *testing.T) {
+	bc, backend, emitterAddr := newAPIChain(t, 40, false)
+	api := ethapi.NewPurethAPI(backend)
+
+	result, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{
+		Address: &emitterAddr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Logs) == 0 {
+		t.Fatal("no logs matched")
+	}
+	for _, l := range result.Logs {
+		if l.Address != emitterAddr {
+			t.Errorf("log address %v, want %v", l.Address, emitterAddr)
+		}
+	}
+	if result.Proof == nil {
+		t.Fatal("no proof returned")
+	}
+
+	// the proof must survive JSON encoding and verify independently
+	enc, err := json.Marshal(result.Proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded logquery.QueryProof
+	if err := json.Unmarshal(enc, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := decoded.Verify(logIndexProverBackend{bc})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if len(verified) != len(result.Logs) {
+		t.Fatalf("verified %d logs, want %d", len(verified), len(result.Logs))
+	}
+	for i, l := range verified {
+		if l.BlockHash != result.Logs[i].BlockHash || l.Index != result.Logs[i].Index {
+			t.Errorf("verified log %d mismatch", i)
+		}
+	}
+
+	// cross-check against a brute-force scan of the receipts
+	var want int
+	for i := uint64(1); i <= 40; i++ {
+		header := bc.GetHeaderByNumber(i)
+		for _, receipt := range bc.GetRawReceipts(header.Hash(), i) {
+			for _, l := range receipt.Logs {
+				if l.Address == emitterAddr {
+					want++
+				}
+			}
+		}
+	}
+	if want != len(result.Logs) {
+		t.Fatalf("%d logs matched, want %d", len(result.Logs), want)
+	}
+
+	// a historical reference head must work too
+	refNumber := bc.CurrentBlock().Number.Uint64() - 10
+	num := rpc.BlockNumber(refNumber)
+	ref := rpc.BlockNumberOrHash{BlockNumber: &num}
+	histResult, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{
+		RefBlock: &ref,
+		Address:  &emitterAddr,
+	})
+	if err != nil {
+		t.Fatalf("historical ref: %v", err)
+	}
+	if uint64(histResult.LastBlock) > refNumber {
+		t.Errorf("historical result reaches block %d, want <= %d", histResult.LastBlock, refNumber)
+	}
+	encHist, err := json.Marshal(histResult.Proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var histProof logquery.QueryProof
+	if err := json.Unmarshal(encHist, &histProof); err != nil {
+		t.Fatal(err)
+	}
+	histVerified, err := histProof.Verify(logIndexProverBackend{bc})
+	if err != nil {
+		t.Fatalf("historical verify: %v", err)
+	}
+	if len(histVerified) != len(histResult.Logs) {
+		t.Fatalf("historical verified %d logs, want %d", len(histVerified), len(histResult.Logs))
+	}
+}
+
+// TestPurethQueryRejects pins the reject paths: a match-all filter, a
+// malformed pattern and a disabled index.
+func TestPurethQueryRejects(t *testing.T) {
+	_, backend, _ := newAPIChain(t, 10, false)
+	api := ethapi.NewPurethAPI(backend)
+
+	// empty filter: match-all is rejected
+	if _, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{}); err == nil {
+		t.Error("empty filter accepted")
+	}
+	// malformed pattern
+	bad := json.RawMessage(`{"field":"unknown","value":"0x01"}`)
+	if _, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{Pattern: &bad}); err == nil {
+		t.Error("malformed pattern accepted")
+	}
+	// unknown reference block
+	unknown := rpc.BlockNumberOrHash{BlockHash: &common.Hash{}, RequireCanonical: true}
+	if _, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{
+		RefBlock: &unknown,
+		Address:  &common.Address{1},
+	}); err == nil {
+		t.Error("unknown reference block accepted")
+	}
+
+	// disabled index
+	_, disabledBackend, emitterAddr := newAPIChain(t, 10, true)
+	disabledAPI := ethapi.NewPurethAPI(disabledBackend)
+	if _, err := disabledAPI.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{Address: &emitterAddr}); err == nil {
+		t.Error("query succeeded with the log index disabled")
+	}
+}
+
+var _ = hexutil.Uint64(0)

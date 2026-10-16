@@ -44,6 +44,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -713,6 +714,12 @@ func (b testBackend) CurrentView() *filtermaps.ChainView {
 	panic("implement me")
 }
 func (b testBackend) NewMatcherBackend() filtermaps.MatcherBackend {
+	panic("implement me")
+}
+func (b testBackend) LogIndexMatcher() *logquery.Matcher {
+	panic("implement me")
+}
+func (b testBackend) LogIndexChainView(refHeader *types.Header) logquery.ChainView {
 	panic("implement me")
 }
 

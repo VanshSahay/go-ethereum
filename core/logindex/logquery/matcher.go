@@ -79,7 +79,7 @@ func (q *FilterQuery) UnmarshalJSON(data []byte) error {
 
 // logIndex provides access to the index tables covering a block range.
 type logIndex interface {
-	GetRangeReaders(common.Hash, common.Range[uint64]) []*logindex.TableReader
+	GetRangeReaders(common.Hash, common.Range[uint64], uint64) []*logindex.TableReader
 }
 
 // ChainView provides read access to the chain data of the reference head.
@@ -122,7 +122,11 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		// nothing matches there
 		readerRange.SetLast(headBlock)
 	}
-	readers := mc.logIndex.GetRangeReaders(refBlockHash, readerRange)
+	var publishedBefore uint64
+	if prove {
+		publishedBefore = refHeader.Number.Uint64()
+	}
+	readers := mc.logIndex.GetRangeReaders(refBlockHash, readerRange, publishedBefore)
 	if len(readers) == 0 {
 		return nil, common.Range[uint64]{}, nil, errors.New("required block range is not indexed")
 	}

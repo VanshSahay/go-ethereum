@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
@@ -506,6 +507,61 @@ func (b *EthAPIBackend) RPCEVMTimeout() time.Duration {
 
 func (b *EthAPIBackend) RPCTxFeeCap() float64 {
 	return b.eth.config.RPCTxFeeCap
+}
+
+// LogIndexMatcher returns the trustless log index query matcher, or nil when
+// the log index is disabled.
+func (b *EthAPIBackend) LogIndexMatcher() *logquery.Matcher {
+	ix := b.eth.blockchain.LogIndex()
+	if ix == nil {
+		return nil
+	}
+	return logquery.NewMatcher(ix, logIndexProverBackend{b.eth.blockchain})
+}
+
+// LogIndexChainView adapts the chain database to the log query's chain view,
+// pinned to the given reference head.
+func (b *EthAPIBackend) LogIndexChainView(refHeader *types.Header) logquery.ChainView {
+	return &logIndexChainView{bc: b.eth.blockchain, head: refHeader}
+}
+
+// logIndexProverBackend adapts the blockchain to the query prover's state
+// proof backend.
+type logIndexProverBackend struct{ bc *core.BlockChain }
+
+func (b logIndexProverBackend) ChainConfig() *params.ChainConfig { return b.bc.Config() }
+
+func (b logIndexProverBackend) StateProverAt(header *types.Header, proofNodes, proofCodes map[common.Hash][]byte) (*state.StateDB, error) {
+	return b.bc.StateProverAt(header, proofNodes, proofCodes)
+}
+
+// logIndexChainView serves the block data of the canonical chain below the
+// reference head to the log query.
+type logIndexChainView struct {
+	bc   *core.BlockChain
+	head *types.Header
+}
+
+func (v *logIndexChainView) HeadNumber() uint64 { return v.head.Number.Uint64() }
+
+func (v *logIndexChainView) Header(number uint64) *types.Header {
+	return v.bc.GetHeaderByNumber(number)
+}
+
+func (v *logIndexChainView) Body(number uint64) *types.Body {
+	header := v.bc.GetHeaderByNumber(number)
+	if header == nil {
+		return nil
+	}
+	return v.bc.GetBody(header.Hash())
+}
+
+func (v *logIndexChainView) RawReceipts(number uint64) types.Receipts {
+	header := v.bc.GetHeaderByNumber(number)
+	if header == nil {
+		return nil
+	}
+	return v.bc.GetRawReceipts(header.Hash(), number)
 }
 
 func (b *EthAPIBackend) CurrentView() *filtermaps.ChainView {
