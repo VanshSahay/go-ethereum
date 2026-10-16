@@ -70,14 +70,9 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 	if queryLast > last {
 		return nil, errors.New("table proofs do not cover the query range")
 	}
-	if p.Query.Limit != 0 && uint64(countResults(p)) > p.Query.Limit {
-		return nil, errors.New("query result count limit exceeded")
-	}
 	var (
 		allLogs       []*types.Log
 		totalResults  uint64
-		lastHash      common.Hash
-		lastNumber    uint64
 		provenTxs     = make(map[uint64]common.Hash) // (block<<32|tx) -> tx hash, from proven tx entries
 		blockEntryOf  = make(map[uint64]common.Hash) // block number -> proven block hash
 		provenResults = make(map[uint64][]*types.Log)
@@ -122,31 +117,27 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 		for key, logs := range results {
 			provenResults[key] = logs
 		}
-		lastHash, lastNumber = tqp.lastBlockHash(), tqp.FirstBlock+tqp.TableSize-1
 	}
-	// the proven chain must reach the reference head: the last proven block
-	// is either the head itself or its parent (the head block's own index
-	// table is inside its publication window and anchored by the head header)
-	headParentOk := lastNumber == p.RefHeader.Number.Uint64()-1 && lastHash == p.RefHeader.ParentHash
-	headOk := lastNumber == p.RefHeader.Number.Uint64() && lastHash == p.RefHeader.Hash()
-	if !headParentOk && !headOk {
+	// the proven chain must reach the reference head: the last table proves
+	// the head's parent block entry, whose content and block number must
+	// match the reference header exactly
+	if blockEntryOf[p.RefHeader.Number.Uint64()-1] != p.RefHeader.ParentHash {
 		return nil, errors.New("proven chain does not reach the reference head")
 	}
-	// every block result's header must be pinned by a proven block entry or by
-	// the reference head anchor
+	// every block result's header must be pinned by a proven block entry; the
+	// head itself is pinned by the reference header
 	for ti := range p.TableQueryProofs {
 		tqp := &p.TableQueryProofs[ti]
 		for i := range tqp.BlockResults {
-			number := tqp.BlockResults[i].Header.Number.Uint64()
-			if number == tqp.FirstBlock+tqp.TableSize-1 && ti == len(p.TableQueryProofs)-1 {
-				continue // anchored by the reference head
+			if tqp.BlockResults[i].Header.Hash() == p.RefHeader.Hash() {
+				continue // anchored by the reference header
 			}
+			number := tqp.BlockResults[i].Header.Number.Uint64()
 			if blockEntryOf[number] != tqp.BlockResults[i].Header.Hash() {
 				return nil, errors.New("unproven block in table proof")
 			}
 		}
 	}
-	_ = lastHash
 	return allLogs, nil
 }
 
@@ -268,13 +259,18 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 	return allLogs, provenBlocks, provenTxs, results, nil
 }
 
-// lastBlockHash returns the header hash of the table's last proven block,
-// which the next table's parent entry chains to.
-func (tqp *tableQueryProof) lastBlockHash() common.Hash {
+// lastProvenBlock returns the header hash of the table's last proven block
+// when it sits at the table's last position: the next table's parent block
+// entry chains to it.
+func (tqp *tableQueryProof) lastProvenBlock() common.Hash {
 	if len(tqp.BlockResults) == 0 {
 		return common.Hash{}
 	}
-	return tqp.BlockResults[len(tqp.BlockResults)-1].Header.Hash()
+	last := tqp.BlockResults[len(tqp.BlockResults)-1]
+	if last.Header.Number.Uint64() == tqp.FirstBlock+tqp.TableSize-1 {
+		return last.Header.Hash()
+	}
+	return common.Hash{}
 }
 
 // calculateTableRoot reconstructs the table root from the proven entries and

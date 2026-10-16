@@ -82,8 +82,8 @@ type logIndex interface {
 	GetRangeReaders(common.Hash, common.Range[uint64]) []*logindex.TableReader
 }
 
-// chainView provides read access to the chain data of the reference head.
-type chainView interface {
+// ChainView provides read access to the chain data of the reference head.
+type ChainView interface {
 	HeadNumber() uint64
 	Header(uint64) *types.Header
 	Body(uint64) *types.Body
@@ -107,7 +107,7 @@ func NewMatcher(logIndex logIndex, contractProverBackend contractProverBackend) 
 
 // GetMatches runs the query and returns the matching logs, the block range
 // they span and, when prove is set, the self-contained query proof.
-func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query FilterQuery, prove bool) ([]*types.Log, common.Range[uint64], *QueryProof, error) {
+func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query FilterQuery, prove bool) ([]*types.Log, common.Range[uint64], *QueryProof, error) {
 	headBlock := chainView.HeadNumber()
 	refHeader := chainView.Header(headBlock)
 	refBlockHash := refHeader.Hash()
@@ -116,9 +116,11 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 	blockRange := common.NewRange[uint64](firstBlock, lastBlock+1-firstBlock)
 	readerRange := blockRange
 	if prove && lastBlock < headBlock {
-		// extend by one block so the last block of the last table can be
-		// anchored by the reference header instead of a block entry
-		readerRange.SetLast(lastBlock + 1)
+		// extend the proven range to the reference head: every result block is
+		// pinned by block entries chaining up to the head's parent entry, so
+		// the tables covering the head must be part of the proof even when
+		// nothing matches there
+		readerRange.SetLast(headBlock)
 	}
 	readers := mc.logIndex.GetRangeReaders(refBlockHash, readerRange)
 	if len(readers) == 0 {
@@ -126,9 +128,9 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 	}
 	sort.Slice(readers, func(i, j int) bool {
 		if query.LimitLatest {
-			return readers[i].Meta.LastBlockNumber > readers[j].Meta.LastBlockNumber
+			return readers[i].BlockRange().First() > readers[j].BlockRange().First()
 		}
-		return readers[i].Meta.LastBlockNumber < readers[j].Meta.LastBlockNumber
+		return readers[i].BlockRange().First() < readers[j].BlockRange().First()
 	})
 	for i := 1; i < len(readers); i++ {
 		// check if the available tables cover a continuous range
@@ -148,18 +150,22 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 		maxResults = int(query.Limit)
 	}
 	var (
-		allLogs         []*types.Log
-		provers         []*tableProver
-		resultFirst     = uint64(math.MaxUint64)
-		resultLast      uint64
-		lastBlockProver *tableProver
+		allLogs     []*types.Log
+		provers     []*tableProver
+		resultFirst = uint64(math.MaxUint64)
+		resultLast  uint64
+		// the tables past the query range carry no results but must be part of
+		// the proof: they chain the covered block entries up to the head
+		tailProvers []*tableProver
 	)
 	for _, tr := range readers {
-		br := tr.BlockRange().Intersection(blockRange) // can be empty in the last table because of readerRange extension
+		br := tr.BlockRange().Intersection(blockRange)
 		prover := newTableProver(tr)
 		if br.IsEmpty() {
-			lastBlockProver = prover
-			break
+			if prove {
+				tailProvers = append(tailProvers, prover)
+			}
+			continue
 		}
 		firstPos := types.IndexPosition{BlockNumber: br.First()}
 		lastPos := types.IndexPosition{BlockNumber: br.Last(), TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
@@ -204,7 +210,9 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 				resultLast = mp.lastResultBlock
 			}
 		}
-		if len(allLogs) >= maxResults {
+		if len(allLogs) >= maxResults && !prove {
+			// when proving, the remaining tables are still needed: they chain
+			// the covered block entries up to the reference head
 			break
 		}
 	}
@@ -220,13 +228,21 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 			provers[i], provers[last-i] = provers[last-i], provers[i]
 		}
 	}
+	if prove {
+		// the tail tables chain the proof up to the reference head: append
+		// them in ascending range order after the scanned provers
+		sort.Slice(tailProvers, func(i, j int) bool {
+			return tailProvers[i].reader.BlockRange().First() < tailProvers[j].reader.BlockRange().First()
+		})
+		provers = append(provers, tailProvers...)
+	}
 	if resultFirst == math.MaxUint64 {
 		resultFirst, resultLast = firstBlock, lastBlock
 	}
 	var proof *QueryProof
 	if prove {
 		var err error
-		if proof, err = makeQueryProof(refHeader, &query, resultFirst, resultLast, mc.contractProverBackend, provers, lastBlockProver); err != nil {
+		if proof, err = makeQueryProof(refHeader, &query, resultFirst, resultLast, mc.contractProverBackend, provers); err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
 	}
@@ -238,7 +254,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 // transactions they point to.
 type matcherProcess struct {
 	logIndex    logIndex
-	chainView   chainView
+	chainView   ChainView
 	matcher     matcherInstance
 	tableReader *logindex.TableReader
 	prover      *tableProver

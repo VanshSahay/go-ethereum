@@ -65,11 +65,11 @@ func (tp *tableProver) addBlockProofs(newProofs map[uint64]*blockProof, newResul
 }
 
 // finalize assembles the table query proof: the entry indexes of the parent
-// block entry, the block entries of every proven block except the last one
-// (anchored by the reference header instead) and the transaction entries of
-// every proven transaction, each with its multiproof section.
-func (tp *tableProver) finalize(proveParentBlock common.Hash) (tableQueryProof, common.Hash, error) {
-	var proveLastBlock common.Hash
+// block entry, the block entries of every proven block and the transaction
+// entries of every proven transaction, each with its multiproof section. The
+// last table of the proof also proves the head's parent block entry, chaining
+// the proven tables to the reference header.
+func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.Header) (tableQueryProof, error) {
 	blockNumbers := make([]uint64, 0, len(tp.blockProofs))
 	for number := range tp.blockProofs {
 		blockNumbers = append(blockNumbers, number)
@@ -89,10 +89,10 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash) (tableQueryProof, 
 		parentEntry := types.EncodeEntry(types.EntryTypeBlock, proveParentBlock[:], tp.reader.BlockRange().First()-1, 0, 0)
 		entryIndex, found, seekErr := tp.reader.SeekEntry(parentEntry)
 		if seekErr != nil {
-			return tableQueryProof{}, common.Hash{}, err
+			return tableQueryProof{}, seekErr
 		}
 		if !found {
-			return tableQueryProof{}, common.Hash{}, errors.New("parent block entry not found")
+			return tableQueryProof{}, errors.New("parent block entry not found")
 		}
 		proof.EntryIndices = append(proof.EntryIndices, entryIndex)
 	}
@@ -100,16 +100,29 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash) (tableQueryProof, 
 		bp := tp.blockProofs[blockNumber]
 		if blockNumber != tp.reader.BlockRange().Last() {
 			proof.EntryIndices = append(proof.EntryIndices, bp.blockEntryIndex)
-		} else {
-			proveLastBlock = bp.header.Hash()
 		}
 		for _, mtx := range bp.matchingTxs {
 			proof.EntryIndices = append(proof.EntryIndices, mtx.txEntryIndex)
 		}
 	}
+	if refHeader != nil {
+		// the block entry of the head's parent chains the last table to the
+		// reference header: its content is the head's parent hash and its
+		// block number field is head-1, matching the reference header exactly
+		anchorEntry := types.EncodeEntry(types.EntryTypeBlock, refHeader.ParentHash[:], refHeader.Number.Uint64()-1, 0, 0)
+		entryIndex, found, seekErr := tp.reader.SeekEntry(anchorEntry)
+		if seekErr != nil {
+			return tableQueryProof{}, seekErr
+		}
+		if !found {
+			return tableQueryProof{}, errors.New("head anchor block entry not found")
+		}
+		proof.EntryIndices = append(proof.EntryIndices, entryIndex)
+	}
 	sort.Slice(proof.EntryIndices, func(i, j int) bool {
 		return proof.EntryIndices[i] < proof.EntryIndices[j]
 	})
+	proof.EntryIndices = slices.Compact(proof.EntryIndices)
 	for i, number := range blockNumbers {
 		bp := tp.blockProofs[number]
 		br := blockResults{
@@ -128,19 +141,19 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash) (tableQueryProof, 
 	for i, entryIndex := range proof.EntryIndices {
 		entry, err := tp.reader.GetEntry(entryIndex)
 		if err != nil {
-			return tableQueryProof{}, common.Hash{}, err
+			return tableQueryProof{}, err
 		}
 		proof.ProvenEntries[i] = entry
 		if proof.ProofHashes, err = tp.makeProofHashes(proof.ProofHashes, lastIndex, entryIndex); err != nil {
-			return tableQueryProof{}, common.Hash{}, err
+			return tableQueryProof{}, err
 		}
 		lastIndex = entryIndex
 	}
 	proof.ProofHashes, err = tp.makeProofHashes(proof.ProofHashes, lastIndex, uint64(math.MaxUint64))
 	if err != nil {
-		return tableQueryProof{}, common.Hash{}, err
+		return tableQueryProof{}, err
 	}
-	return proof, proveLastBlock, nil
+	return proof, nil
 }
 
 // makeProofHashes appends the non-leaf tree node hashes between proven entry
@@ -321,8 +334,10 @@ func appendUint64(dst []byte, v uint64) []byte {
 
 // makeQueryProof assembles the query proof from the per-table provers:
 // adjacent tables are chained through their parent block entries and each
-// table root is proven against the reference header's state.
-func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver, lastBlockProver *tableProver) (*QueryProof, error) {
+// table root is proven against the reference header's state. The last prover
+// also proves the head's parent block entry, chaining the tables to the
+// reference header.
+func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver) (*QueryProof, error) {
 	proof := &QueryProof{
 		Query:            *query,
 		RefHeader:        *refHeader,
@@ -336,14 +351,15 @@ func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, las
 		if i != 0 && prover.reader.BlockRange().First() != provers[i-1].reader.BlockRange().AfterLast() {
 			return nil, errors.New("prover block ranges are not continuous")
 		}
-		if prover == lastBlockProver && proveParentBlock == (common.Hash{}) {
-			break
+		var lastRef *types.Header
+		if i == len(provers)-1 {
+			lastRef = refHeader
 		}
-		tproof, proveLastBlock, err := prover.finalize(proveParentBlock)
+		tproof, err := prover.finalize(proveParentBlock, lastRef)
 		if err != nil {
 			return nil, err
 		}
-		proveParentBlock = proveLastBlock
+		proveParentBlock = tproof.lastProvenBlock()
 		tproof.IndexContract = proof.addOrGetIndexContract(prover.reader.IndexContract)
 		proof.TableQueryProofs[i] = tproof
 		// generate state proof nodes for the table root; the last table uses
@@ -370,13 +386,6 @@ func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, las
 		if tableRoot != prover.reader.TableRoot {
 			return nil, errors.New("local table root does not match index contract")
 		}
-	}
-	// the last proven block must chain to the reference head: either the head
-	// itself or its parent (the head block's own table is inside its
-	// publication window and anchored by the head header)
-	if proveParentBlock != (common.Hash{}) &&
-		proveParentBlock != refHeader.Hash() && proveParentBlock != refHeader.ParentHash {
-		return nil, errors.New("could not prove last block of last table")
 	}
 	proof.ContractProofNodes = proofNodes.proofForStorage()
 	proof.ContractProofCodes = proofCodes.proofForStorage()
