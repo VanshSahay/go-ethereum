@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
+	"math/big"
 )
 
 type contractVerifierBackend interface {
@@ -70,6 +71,20 @@ func getTableRoot(statedb *state.StateDB, chainConfig *params.ChainConfig, refHe
 	var tableRoot common.Hash
 	copy(tableRoot[:], result)
 	return tableRoot, nil
+}
+
+// IndexSlot returns the storage slot of the table root for the given table
+// per the EIP-8304 ring-buffer layout: table_size*1024 + (first_block/ts)%1024.
+func IndexSlot(tableSize, firstBlock uint64) common.Hash {
+	return common.BigToHash(new(big.Int).SetUint64(tableSize*1024 + (firstBlock/tableSize)%1024))
+}
+
+// getTableRootRaw reads the table root directly from the contract's storage
+// slot on the given state, bypassing the get() freshness window: the slot is
+// set by the system call in the table's publication block regardless of the
+// window, so the freshest table's root is provable this way.
+func getTableRootRaw(statedb *state.StateDB, contract common.Address, firstBlock, tableSize uint64) common.Hash {
+	return statedb.GetState(contract, IndexSlot(tableSize, firstBlock))
 }
 
 // chainContext is a minimal consensus context serving only the reference head.
@@ -115,11 +130,22 @@ func (c *chainContext) GetHeaderByHash(hash common.Hash) *types.Header {
 // getProvenTableRoot retrieves the table root by executing the index
 // contract's get() on the state reconstructed from the contract state proof.
 func getProvenTableRoot(backend contractVerifierBackend, refHead *types.Header, contract common.Address, firstBlock, tableSize uint64, proofNodes, proofCodes map[common.Hash][]byte) (common.Hash, error) {
-	proofDb := triedb.NewProofReader(proofNodes, &triedb.Config{})
-	codeDb := state.NewProofCodeReader(proofCodes)
-	statedb, err := state.New(refHead.Root, state.NewMPTDatabase(proofDb, codeDb))
+	stateDb, err := provenState(backend, refHead, proofNodes, proofCodes)
 	if err != nil {
 		return common.Hash{}, err
 	}
-	return getTableRoot(statedb, backend.ChainConfig(), refHead, contract, firstBlock, tableSize)
+	return getTableRoot(stateDb, backend.ChainConfig(), refHead, contract, firstBlock, tableSize)
+}
+
+// getProvenTableRootState is getProvenTableRoot over an already-reconstructed
+// state.
+func getProvenTableRootState(stateDb *state.StateDB, chainConfig *params.ChainConfig, refHead *types.Header, contract common.Address, firstBlock, tableSize uint64) (common.Hash, error) {
+	return getTableRoot(stateDb, chainConfig, refHead, contract, firstBlock, tableSize)
+}
+
+// provenState reconstructs the reference head's state from the proof maps.
+func provenState(backend contractVerifierBackend, refHead *types.Header, proofNodes, proofCodes map[common.Hash][]byte) (*state.StateDB, error) {
+	proofDb := triedb.NewProofReader(proofNodes, &triedb.Config{})
+	codeDb := state.NewProofCodeReader(proofCodes)
+	return state.New(refHead.Root, state.NewMPTDatabase(proofDb, codeDb))
 }

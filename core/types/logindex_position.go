@@ -51,6 +51,12 @@ func (p IndexPosition) Compare(q IndexPosition) int {
 	return 0
 }
 
+// Position returns the decoded position fields of the entry. Block entries
+// return the block number with zero tx/log fields.
+func (e IndexEntry) Position() (IndexPosition, error) {
+	return PositionFromEntry(e)
+}
+
 // PositionFromEntry decodes the position fields of an index entry. Block
 // entries return the block number with zero tx/log fields.
 func PositionFromEntry(entry IndexEntry) (IndexPosition, error) {

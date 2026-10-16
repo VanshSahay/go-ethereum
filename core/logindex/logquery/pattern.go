@@ -160,8 +160,9 @@ func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
 			typ = uint32(types.EntryTypeLogAddress)
 			content = make([]byte, common.AddressLength)
 			if len(value) == 32 {
-				// the JSON round-trip emits left-padded 32-byte values
-				copy(content, value[common.AddressLength:])
+				// the JSON round-trip emits left-padded 32-byte values: the
+				// address is the low 20 bytes
+				copy(content, value[12:])
 			} else {
 				copy(content[common.AddressLength-len(value):], value)
 			}

@@ -18,6 +18,7 @@ package logquery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"sort"
@@ -38,6 +39,42 @@ type FilterQuery struct {
 	LastBlock   uint64         `json:"lastBlock"`
 	Limit       uint64         `json:"limit"`
 	LimitLatest bool           `json:"limitLatest"`
+}
+
+// MarshalJSON encodes the query with the pattern's own marshaling.
+func (q FilterQuery) MarshalJSON() ([]byte, error) {
+	pattern, err := json.Marshal(q.Pattern)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Pattern     json.RawMessage `json:"pattern"`
+		FirstBlock  uint64          `json:"firstBlock"`
+		LastBlock   uint64          `json:"lastBlock"`
+		Limit       uint64          `json:"limit"`
+		LimitLatest bool            `json:"limitLatest"`
+	}{pattern, q.FirstBlock, q.LastBlock, q.Limit, q.LimitLatest})
+}
+
+// UnmarshalJSON decodes the query, reconstructing the pattern from its JSON
+// form via the pattern grammar.
+func (q *FilterQuery) UnmarshalJSON(data []byte) error {
+	var p struct {
+		Pattern     json.RawMessage `json:"pattern"`
+		FirstBlock  uint64          `json:"firstBlock"`
+		LastBlock   uint64          `json:"lastBlock"`
+		Limit       uint64          `json:"limit"`
+		LimitLatest bool            `json:"limitLatest"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	matcher, err := NewPatternMatcherFromJSON(p.Pattern)
+	if err != nil {
+		return err
+	}
+	q.Pattern, q.FirstBlock, q.LastBlock, q.Limit, q.LimitLatest = matcher, p.FirstBlock, p.LastBlock, p.Limit, p.LimitLatest
+	return nil
 }
 
 // logIndex provides access to the index tables covering a block range.
@@ -107,7 +144,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 		}
 	}
 	maxResults := math.MaxInt
-	if uint64(maxResults) > query.Limit {
+	if query.Limit < uint64(math.MaxInt) {
 		maxResults = int(query.Limit)
 	}
 	var (
@@ -151,6 +188,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 		if err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
+		mp.prover.addBlockProofs(mp.blockProofs, count)
 		allLogs = append(allLogs, mp.allMatches...)
 		provers = append(provers, prover)
 		if count > 0 {
@@ -187,10 +225,6 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView chainView, query Fi
 	}
 	var proof *QueryProof
 	if prove {
-		if lastBlockProver != nil && len(provers) > 0 &&
-			lastBlockProver.reader.BlockRange().First() == provers[len(provers)-1].reader.BlockRange().AfterLast() {
-			provers = append(provers, lastBlockProver)
-		}
 		var err error
 		if proof, err = makeQueryProof(refHeader, &query, resultFirst, resultLast, mc.contractProverBackend, provers, lastBlockProver); err != nil {
 			return nil, common.Range[uint64]{}, nil, err
@@ -236,7 +270,7 @@ func (mp *matcherProcess) run(ctx context.Context, remaining int) (int, error) {
 			return count, err
 		}
 		if pos == nil {
-			return count, nil
+			return count, mp.finish()
 		}
 		if err := mp.addMatch(pos); err != nil {
 			return count, err
@@ -252,7 +286,15 @@ func (mp *matcherProcess) run(ctx context.Context, remaining int) (int, error) {
 			return count, err
 		}
 	}
-	return count, nil
+	return count, mp.finish()
+}
+
+// finish flushes the pending block proof of the last matched block.
+func (mp *matcherProcess) finish() error {
+	if mp.lastHeader == nil {
+		return nil
+	}
+	return mp.finalizeLastMatchBlock()
 }
 
 // updateLastMatchBlock loads the chain data of the match's block and

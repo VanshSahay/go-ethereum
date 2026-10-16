@@ -346,16 +346,36 @@ func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, las
 		proveParentBlock = proveLastBlock
 		tproof.IndexContract = proof.addOrGetIndexContract(prover.reader.IndexContract)
 		proof.TableQueryProofs[i] = tproof
-		// generate state proof nodes for the table root
-		tableRoot, err := proveTableRoot(backend, refHeader, prover.reader.IndexContract, prover.reader.BlockRange().First(), prover.reader.BlockRange().Count(), proofNodes, proofCodes)
-		if err != nil {
-			return nil, err
+		// generate state proof nodes for the table root; the last table uses
+		// the raw storage slot (its get() freshness window has not opened at
+		// the reference head yet)
+		// tables inside their get() confirmation delay prove the root via the
+		// raw storage slot (set by the system call at publication regardless
+		// of the window); older tables execute get() on the proven state
+		br := prover.reader.BlockRange()
+		fresh := logindex.PublicationSchedule(br.Count(), br.First())+1 > refHeader.Number.Uint64()
+		var tableRoot common.Hash
+		if fresh {
+			statedb, err := backend.StateProverAt(refHeader, proofNodes, proofCodes)
+			if err != nil {
+				return nil, err
+			}
+			tableRoot = getTableRootRaw(statedb, prover.reader.IndexContract, br.First(), br.Count())
+		} else {
+			tableRoot, err = proveTableRoot(backend, refHeader, prover.reader.IndexContract, br.First(), br.Count(), proofNodes, proofCodes)
+			if err != nil {
+				return nil, errors.New("proveTableRoot [first=" + itoa(br.First()) + " size=" + itoa(br.Count()) + "]: " + err.Error())
+			}
 		}
 		if tableRoot != prover.reader.TableRoot {
 			return nil, errors.New("local table root does not match index contract")
 		}
 	}
-	if proveParentBlock != (common.Hash{}) && proveParentBlock != refHeader.Hash() {
+	// the last proven block must chain to the reference head: either the head
+	// itself or its parent (the head block's own table is inside its
+	// publication window and anchored by the head header)
+	if proveParentBlock != (common.Hash{}) &&
+		proveParentBlock != refHeader.Hash() && proveParentBlock != refHeader.ParentHash {
 		return nil, errors.New("could not prove last block of last table")
 	}
 	proof.ContractProofNodes = proofNodes.proofForStorage()

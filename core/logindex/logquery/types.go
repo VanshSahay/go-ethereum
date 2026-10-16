@@ -87,17 +87,21 @@ type indexPositionBoundary struct {
 type indexPositionSet []indexPositionBoundary
 
 // contains tells whether the given position lies inside any interval of the
-// set. The boundary list must be normalized (sorted, alternating).
+// set. Intervals are inclusive of both endpoints, and a boundary pair at the
+// same position is a single-position interval.
 func (ips indexPositionSet) contains(p types.IndexPosition) bool {
 	inside := false
 	for _, b := range ips {
-		if c := b.p.Compare(p); c >= 0 {
-			// b.p >= p: p is inside iff the last opened interval extends
-			// beyond it, i.e. the previous boundary opened an interval and
-			// this boundary is at or after p
-			return inside
+		if c := b.p.Compare(p); c < 0 {
+			inside = b.d > 0
+			continue
 		}
-		inside = b.d > 0
+		// b.p >= p: an opening boundary at p puts p inside; a closing
+		// boundary at p leaves p inside (intervals include their ends)
+		if b.d > 0 {
+			inside = true
+		}
+		break
 	}
 	return inside
 }
@@ -163,7 +167,9 @@ func ipsIntersection(sets []indexPositionSet) indexPositionSet {
 // in the proven index list means the prover paid for a multiproof over a
 // range that is claimed to contain no matching entries.
 func (tqp *tableQueryProof) excludeBefore(i int) bool {
-	if i == 0 {
+	// positions past the last proven entry are covered by the tail
+	// multiproof (iterateProofIndices to MaxUint64), so no gap there
+	if i <= 0 || i >= len(tqp.EntryIndices) {
 		return false
 	}
 	return tqp.EntryIndices[i] != tqp.EntryIndices[i-1]+1

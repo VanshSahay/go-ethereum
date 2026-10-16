@@ -126,19 +126,28 @@ func (r *CodeReader) Code(addr common.Address, codeHash common.Hash) []byte {
 	}
 	r.miss.Add(1)
 
+	if r.proofCodes != nil {
+		// writer mode: read from the backing store and record every code, so
+		// the collected set is exactly the witness needed; reader mode has no
+		// backing store and resolves exclusively through the proof map
+		if r.db != nil {
+			code = rawdb.ReadCode(r.db, codeHash)
+			if len(code) > 0 {
+				r.cache.Put(codeHash, code)
+				r.missBytes.Add(int64(len(code)))
+				if _, ok := r.proofCodes[codeHash]; !ok {
+					r.proofCodes[codeHash] = code
+				}
+				return code
+			}
+			return r.proofCodes[codeHash]
+		}
+		return r.proofCodes[codeHash]
+	}
 	code = rawdb.ReadCode(r.db, codeHash)
 	if len(code) > 0 {
 		r.cache.Put(codeHash, code)
 		r.missBytes.Add(int64(len(code)))
-		if r.proofCodes != nil {
-			if _, ok := r.proofCodes[codeHash]; !ok {
-				r.proofCodes[codeHash] = code
-			}
-		}
-		return code
-	}
-	if r.proofCodes != nil {
-		return r.proofCodes[codeHash]
 	}
 	return code
 }
@@ -166,6 +175,21 @@ func (r *CodeReader) CodeWithPrefix(addr common.Address, codeHash common.Hash) [
 	}
 	r.miss.Add(1)
 
+	if r.proofCodes != nil {
+		if r.db != nil {
+			code = rawdb.ReadCodeWithPrefix(r.db, codeHash)
+			if len(code) > 0 {
+				r.cache.Put(codeHash, code)
+				r.missBytes.Add(int64(len(code)))
+				if _, ok := r.proofCodes[codeHash]; !ok {
+					r.proofCodes[codeHash] = code
+				}
+				return code
+			}
+			return r.proofCodes[codeHash]
+		}
+		return r.proofCodes[codeHash]
+	}
 	code = rawdb.ReadCodeWithPrefix(r.db, codeHash)
 	if len(code) > 0 {
 		r.cache.Put(codeHash, code)

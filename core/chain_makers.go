@@ -327,12 +327,16 @@ func (b *BlockGen) collectRequests(readonly bool) (requests [][]byte, bal *bal.C
 	blockContext := NewEVMBlockContext(b.header, b.cm, &b.header.Coinbase)
 	evm := vm.NewEVM(blockContext, statedb, b.cm.config, vm.Config{})
 
-	// EIP-8304: the level-0 index table root is stateless and exact for
-	// single-block generation; higher-level publications need the maintained
-	// table state and are handled by the chain-level index producer.
+	// EIP-8304: the chain maker's own index producer runs the full
+	// publication schedule, so the generated blocks' system calls match a
+	// re-import of the same chain byte for byte.
 	var tablesToWrite []TableWrite
 	if b.cm.config.IsAmsterdam(b.header.Number, b.header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		tablesToWrite = BuildLogIndexForBlock(b.header.Number.Uint64(), b.header.ParentHash, b.receipts)
+		var err error
+		tablesToWrite, err = b.cm.logIndex.TableWritesForBlock(b.header.Number.Uint64(), b.header.ParentHash, b.receipts)
+		if err != nil {
+			panic(fmt.Sprintf("failed to build index tables: %v", err))
+		}
 	}
 	requests, bal, err := PostExecution(context.Background(), b.cm.config, b.header.Number, b.header.Time, blockLogs, tablesToWrite, evm, uint32(len(b.txs)+1))
 	if err != nil {
