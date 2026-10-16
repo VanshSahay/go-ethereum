@@ -45,6 +45,25 @@ func BuildLevel0Root(blockNumber uint64, parentHash common.Hash, receipts types.
 	return types.IndexTableRoot(blockEntries(blockNumber, parentHash, receipts))
 }
 
+// ensureTableMerged merges the given table if it does not exist yet, first
+// making sure its source tables one level below are merged.
+func (ix *Indexer) ensureTableMerged(id tableID) error {
+	if _, err := ix.storage.getTableReader(id); err == nil {
+		return nil
+	}
+	if id.level == 0 {
+		return errTableNotFound
+	}
+	sourceIndices := shiftRangeLevel(common.NewRange[uint64](id.index, 1), ix.params.tableLevels[id.level], ix.params.tableLevels[id.level-1], false)
+	for i := uint64(0); i < sourceIndices.Count(); i++ {
+		if err := ix.ensureTableMerged(tableID{level: id.level - 1, index: sourceIndices.First() + i}); err != nil {
+			return err
+		}
+	}
+	_, err := ix.mergeTable(id, func() bool { return false })
+	return err
+}
+
 // TableWritesForBlock builds the index table roots committed during the
 // processing of the given block: the level-0 table covering the block itself
 // and, whenever the publication schedule fires, the due higher-level table.
@@ -123,22 +142,18 @@ func (ix *Indexer) TableWritesForBlock(blockNumber uint64, parentHash common.Has
 		id := tableID{level: level, index: firstBlock / size}
 		tr, err := ix.storage.getTableReader(id)
 		if err != nil {
-			// Not merged yet: merge on the spot. This needs the fully
-			// covered source tables; on a fresh indexer close to the fork
-			// they may not all be indexed yet, in which case the publication
-			// is skipped and the table state catches up through the feed.
-			// A concurrent background merge of the same table may claim it
-			// first, so the reader is re-checked after every attempt.
-			for attempt := 0; attempt < 3; attempt++ {
-				if _, mergeErr := ix.mergeTable(id, func() bool { return false }); mergeErr != nil && attempt == 2 {
-					log.Warn("Skipping index table publication", "level", id.level, "index", id.index, "error", mergeErr)
-				}
-				if tr, err = ix.storage.getTableReader(id); err == nil {
-					break
-				}
-			}
-			if err != nil {
+			// Not merged yet: merge on the spot, recursively ensuring the
+			// source tables below it. A publication is consensus visible, so
+			// it must not be skipped while its sources exist; only on a fresh
+			// indexer close to the fork, where earlier tables were never
+			// indexed, is it skipped and the table state catches up through
+			// the feed.
+			if mergeErr := ix.ensureTableMerged(id); mergeErr != nil {
+				log.Warn("Skipping index table publication", "level", id.level, "index", id.index, "error", mergeErr)
 				continue
+			}
+			if tr, err = ix.storage.getTableReader(id); err != nil {
+				return nil, err
 			}
 		}
 		writes = append(writes, TableWrite{FirstBlock: firstBlock, TableSize: size, Root: tr.TableRoot})

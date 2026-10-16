@@ -18,6 +18,7 @@ package logindex
 
 import (
 	"errors"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -50,7 +51,7 @@ func (ix *Indexer) mergeLoop(threadIndex int) {
 			ix.updateTableOperations()
 			ix.lock.Unlock()
 		case opMerge:
-			done, err := ix.mergeTable(currentOp.id, func() bool {
+			_, err := ix.mergeTable(currentOp.id, func() bool {
 				select {
 				case <-ix.updateMergeCh[threadIndex]:
 					return true
@@ -61,12 +62,15 @@ func (ix *Indexer) mergeLoop(threadIndex int) {
 			if err != nil {
 				r := ix.params.blockRange(currentOp.id)
 				log.Error("Failed to merge index table", "start", r.First(), "count", r.Count(), "error", err)
+				// back off before the operation is rescheduled, so a
+				// permanently failing merge cannot spin the thread
+				time.Sleep(100 * time.Millisecond)
 			}
-			if done {
-				ix.lock.Lock()
-				ix.updateTableOperations()
-				ix.lock.Unlock()
-			}
+			// reschedule in every case: a failed operation must not wedge
+			// the thread against the operations the scheduler wants next
+			ix.lock.Lock()
+			ix.updateTableOperations()
+			ix.lock.Unlock()
 		}
 	}
 }

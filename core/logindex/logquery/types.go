@@ -18,6 +18,7 @@ package logquery
 
 import (
 	"errors"
+	"slices"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -74,111 +75,57 @@ func (p *QueryProof) addOrGetIndexContract(contract common.Address) uint32 {
 	return uint32(len(p.IndexContracts) - 1)
 }
 
-// indexPositionBoundary is a signed interval boundary of the index position
-// space: position p with direction +1 opens an interval, -1 closes it.
-type indexPositionBoundary struct {
-	p types.IndexPosition
-	d int
-}
+// indexPositionSet is an exact, sorted set of index positions. The prover
+// proves every entry of the searched values in the scanned range, so the set
+// reconstructed by the verifier is complete and the exclusion cross-check is
+// exact.
+type indexPositionSet []types.IndexPosition
 
-// indexPositionSet represents an ordered set of index positions as a list of
-// signed boundaries alternating between interval starts (+1) and ends (-1).
-// The boundaries are kept sorted by position, ends before starts on ties.
-type indexPositionSet []indexPositionBoundary
-
-// contains tells whether the given position lies inside any interval of the
-// set. Intervals are inclusive of both endpoints, and a boundary pair at the
-// same position is a single-position interval.
+// contains tells whether the given position is in the set.
 func (ips indexPositionSet) contains(p types.IndexPosition) bool {
-	inside := false
-	for _, b := range ips {
-		if c := b.p.Compare(p); c < 0 {
-			inside = b.d > 0
-			continue
-		}
-		// b.p >= p: an opening boundary at p puts p inside; a closing
-		// boundary at p leaves p inside (intervals include their ends)
-		if b.d > 0 {
-			inside = true
-		}
-		break
-	}
-	return inside
+	i := sort.Search(len(ips), func(i int) bool { return ips[i].Compare(p) >= 0 })
+	return i < len(ips) && ips[i] == p
 }
 
-// ipsMerge normalizes the concatenated sets: positions covered by at least
-// threshold input intervals are kept. Intervals are inclusive of both
-// endpoints, so a closing boundary at a position still covers it and
-// single-position intervals survive the merge.
-func ipsMerge(sets []indexPositionSet, threshold int) indexPositionSet {
-	var b []indexPositionBoundary
-	for _, set := range sets {
-		b = append(b, set...)
-	}
-	sort.SliceStable(b, func(i, j int) bool {
-		if c := b[i].p.Compare(b[j].p); c != 0 {
-			return c < 0
-		}
-		return b[i].d > b[j].d
-	})
-	res := make(indexPositionSet, 0, len(b))
-	var (
-		sum     int // opens minus closes strictly before the current position
-		lastCmp bool
-		start   types.IndexPosition
-	)
-	for i := 0; i < len(b); {
-		p := b[i].p
-		opens := 0
-		j := i
-		for ; j < len(b) && b[j].p == p; j++ {
-			if b[j].d > 0 {
-				opens++
-			}
-		}
-		cmp := sum+opens >= threshold
-		switch {
-		case cmp && !lastCmp:
-			start = p
-		case !cmp && lastCmp:
-			res = append(res,
-				indexPositionBoundary{p: start, d: 1},
-				indexPositionBoundary{p: p, d: -1})
-		}
-		lastCmp = cmp
-		for k := i; k < j; k++ {
-			if b[k].d > 0 {
-				sum++
-			} else {
-				sum--
-			}
-		}
-		i = j
-	}
-	if lastCmp {
-		res = append(res, indexPositionBoundary{p: start, d: 1})
-	}
-	return res
-}
-
+// ipsUnion returns the union of the sorted sets.
 func ipsUnion(sets []indexPositionSet) indexPositionSet {
-	if len(sets) == 0 {
-		return nil
+	var out indexPositionSet
+	for _, set := range sets {
+		out = append(out, set...)
 	}
-	return ipsMerge(sets, 1)
+	sort.Slice(out, func(i, j int) bool { return out[i].Compare(out[j]) < 0 })
+	return slices.CompactFunc(out, func(a, b types.IndexPosition) bool { return a == b })
 }
 
-// filter normalizes the set: only positions covered by at least threshold
-// copies in the (concatenated, possibly overlapping) input are kept.
-func (ips indexPositionSet) filter(threshold int) indexPositionSet {
-	return ipsMerge([]indexPositionSet{ips}, threshold)
-}
-
+// ipsIntersection returns the intersection of the sorted sets.
 func ipsIntersection(sets []indexPositionSet) indexPositionSet {
 	if len(sets) == 0 {
 		return nil
 	}
-	return ipsMerge(sets, len(sets))
+	for _, set := range sets {
+		if len(set) == 0 {
+			return nil
+		}
+	}
+	out := sets[0]
+	for _, set := range sets[1:] {
+		var next indexPositionSet
+		i, j := 0, 0
+		for i < len(out) && j < len(set) {
+			switch c := out[i].Compare(set[j]); {
+			case c == 0:
+				next = append(next, out[i])
+				i++
+				j++
+			case c < 0:
+				i++
+			default:
+				j++
+			}
+		}
+		out = next
+	}
+	return out
 }
 
 // excludeBefore tells whether the entry positions before the given proven
@@ -217,12 +164,9 @@ func (tqp *tableQueryProof) findValueRange(typ uint32, content []byte, begin, en
 // receipt constrains the set.
 func (tqp *tableQueryProof) getValueMatches(typ uint32, content []byte, begin, end types.IndexPosition) indexPositionSet {
 	firstInRange, afterLastInRange := tqp.findValueRange(typ, content, begin, end)
-	var ips indexPositionSet
+	ips := make(indexPositionSet, 0, afterLastInRange-firstInRange)
 	for i := firstInRange; i < afterLastInRange; i++ {
-		p := mustPosition(tqp.ProvenEntries[i])
-		ips = append(ips,
-			indexPositionBoundary{p: p, d: 1},
-			indexPositionBoundary{p: p, d: -1})
+		ips = append(ips, mustPosition(tqp.ProvenEntries[i]))
 	}
 	return ips
 }

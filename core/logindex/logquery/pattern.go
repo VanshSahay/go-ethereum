@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"math"
 	"slices"
 	"strconv"
@@ -468,10 +469,13 @@ func (m *offsetMatcher) proofMatches(tqp *tableQueryProof, begin, end types.Inde
 	addOffset(&begin, m.offset)
 	addOffset(&end, m.offset)
 	ips := m.child.proofMatches(tqp, begin, end)
-	for i := range ips {
-		addOffset(&ips[i].p, -m.offset)
+	shifted := make(indexPositionSet, 0, len(ips))
+	for _, p := range ips {
+		addOffset(&p, -m.offset)
+		shifted = append(shifted, p)
 	}
-	return ips.filter(1)
+	sort.Slice(shifted, func(i, j int) bool { return shifted[i].Compare(shifted[j]) < 0 })
+	return shifted
 }
 
 func (m *offsetMatcher) MarshalJSON() ([]byte, error) {

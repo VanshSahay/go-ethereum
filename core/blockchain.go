@@ -450,7 +450,17 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 			err error
 		)
 		if cfg.LogIndexPath != "" {
-			ix, err = logindex.NewIndexer(logindex.DefaultParams(), logindex.Config{History: cfg.LogIndexHistory}, cfg.LogIndexPath)
+			// the canonical hash source lets a restart validate its persisted
+			// tables against the chain instead of dropping them
+			ix, err = logindex.NewIndexer(logindex.DefaultParams(), logindex.Config{
+				History: cfg.LogIndexHistory,
+				BlockHashAt: func(n uint64) common.Hash {
+					if header := bc.GetHeaderByNumber(n); header != nil {
+						return header.Hash()
+					}
+					return common.Hash{}
+				},
+			}, cfg.LogIndexPath)
 		} else {
 			ix = logindex.NewMemoryIndexer()
 		}
