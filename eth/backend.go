@@ -432,6 +432,9 @@ func (s *Ethereum) APIs() []rpc.API {
 			Namespace: "debug",
 			Service:   NewDebugAPI(s),
 		}, {
+			Namespace: "pureth",
+			Service:   ethapi.NewPurethAPI(s.APIBackend),
+		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
 		},

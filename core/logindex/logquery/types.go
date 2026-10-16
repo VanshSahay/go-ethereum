@@ -106,8 +106,10 @@ func (ips indexPositionSet) contains(p types.IndexPosition) bool {
 	return inside
 }
 
-// filter normalizes a boundary list: only positions covered by at least
-// threshold input sets are kept. The input lists are concatenated, not sorted.
+// ipsMerge normalizes the concatenated sets: positions covered by at least
+// threshold input intervals are kept. Intervals are inclusive of both
+// endpoints, so a closing boundary at a position still covers it and
+// single-position intervals survive the merge.
 func ipsMerge(sets []indexPositionSet, threshold int) indexPositionSet {
 	var b []indexPositionBoundary
 	for _, set := range sets {
@@ -121,23 +123,40 @@ func ipsMerge(sets []indexPositionSet, threshold int) indexPositionSet {
 	})
 	res := make(indexPositionSet, 0, len(b))
 	var (
-		sum     int
+		sum     int // opens minus closes strictly before the current position
 		lastCmp bool
 		start   types.IndexPosition
 	)
-	for i, bb := range b {
-		sum += bb.d
-		cmp := sum >= threshold
-		if cmp != lastCmp && (i == len(b)-1 || b[i+1].p != bb.p) {
-			if cmp {
-				start = bb.p
-			} else {
-				res = append(res,
-					indexPositionBoundary{p: start, d: 1},
-					indexPositionBoundary{p: bb.p, d: -1})
+	for i := 0; i < len(b); {
+		p := b[i].p
+		opens := 0
+		j := i
+		for ; j < len(b) && b[j].p == p; j++ {
+			if b[j].d > 0 {
+				opens++
 			}
-			lastCmp = cmp
 		}
+		cmp := sum+opens >= threshold
+		switch {
+		case cmp && !lastCmp:
+			start = p
+		case !cmp && lastCmp:
+			res = append(res,
+				indexPositionBoundary{p: start, d: 1},
+				indexPositionBoundary{p: p, d: -1})
+		}
+		lastCmp = cmp
+		for k := i; k < j; k++ {
+			if b[k].d > 0 {
+				sum++
+			} else {
+				sum--
+			}
+		}
+		i = j
+	}
+	if lastCmp {
+		res = append(res, indexPositionBoundary{p: start, d: 1})
 	}
 	return res
 }
@@ -191,32 +210,19 @@ func (tqp *tableQueryProof) findValueRange(typ uint32, content []byte, begin, en
 }
 
 // getValueMatches computes the index position set that the proven entries
-// imply for the given (type, content) matcher within [begin, end]: runs of
-// contiguous proven entries contribute their position intervals, gaps
-// contribute proven absence.
+// imply for the given (type, content) matcher within [begin, end]: the exact
+// positions of every proven value entry. The prover proves all entries of the
+// searched values in the scanned range, so within it this set is complete and
+// the exclusion cross-check is exact; outside the scanned range no proven
+// receipt constrains the set.
 func (tqp *tableQueryProof) getValueMatches(typ uint32, content []byte, begin, end types.IndexPosition) indexPositionSet {
 	firstInRange, afterLastInRange := tqp.findValueRange(typ, content, begin, end)
 	var ips indexPositionSet
-	if tqp.excludeBefore(firstInRange) {
-		if firstInRange < afterLastInRange {
-			ips = append(ips, indexPositionBoundary{p: mustPosition(tqp.ProvenEntries[firstInRange]), d: 1})
-		}
-	} else {
-		ips = append(ips, indexPositionBoundary{p: begin, d: 1})
-	}
-	for i := firstInRange + 1; i < afterLastInRange; i++ {
-		if tqp.excludeBefore(i) {
-			ips = append(ips,
-				indexPositionBoundary{p: mustPosition(tqp.ProvenEntries[i-1]), d: -1},
-				indexPositionBoundary{p: mustPosition(tqp.ProvenEntries[i]), d: 1})
-		}
-	}
-	if tqp.excludeBefore(afterLastInRange) {
-		if firstInRange < afterLastInRange {
-			ips = append(ips, indexPositionBoundary{p: mustPosition(tqp.ProvenEntries[afterLastInRange-1]), d: -1})
-		}
-	} else {
-		ips = append(ips, indexPositionBoundary{p: end, d: -1})
+	for i := firstInRange; i < afterLastInRange; i++ {
+		p := mustPosition(tqp.ProvenEntries[i])
+		ips = append(ips,
+			indexPositionBoundary{p: p, d: 1},
+			indexPositionBoundary{p: p, d: -1})
 	}
 	return ips
 }

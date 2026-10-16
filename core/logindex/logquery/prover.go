@@ -17,6 +17,7 @@
 package logquery
 
 import (
+	"bytes"
 	"errors"
 	"math"
 	"math/bits"
@@ -36,10 +37,11 @@ import (
 // proven (all touched entries; the cost optimizer of the reference design is
 // deliberately omitted, proven supersets are always sound).
 type tableProver struct {
-	reader      *logindex.TableReader
-	treeHeight  int
-	blockProofs map[uint64]*blockProof
-	resultCount int
+	reader       *logindex.TableReader
+	treeHeight   int
+	blockProofs  map[uint64]*blockProof
+	resultCount  int
+	valueEntries []uint64
 }
 
 func newTableProver(reader *logindex.TableReader) *tableProver {
@@ -47,6 +49,38 @@ func newTableProver(reader *logindex.TableReader) *tableProver {
 		reader:     reader,
 		treeHeight: 64 - bits.LeadingZeros64(max(reader.EntryCount, 1)-1),
 	}
+}
+
+// proveValueEntries proves every index entry of the pattern's search values
+// within the scanned range: the verifier reconstructs the exact potential
+// match set from them, which makes the exclusion cross-check complete.
+func (tp *tableProver) proveValueEntries(values []matcherValue, first, last types.IndexPosition) error {
+	for _, value := range values {
+		entry := types.EncodeEntry(types.EntryType(value.typ), value.content, first.BlockNumber, first.TxIndex, first.LogIndex)
+		pos, _, err := tp.reader.SeekEntry(entry)
+		if err != nil {
+			return err
+		}
+		for ; pos < tp.reader.EntryCount; pos++ {
+			e, err := tp.reader.GetEntry(pos)
+			if err != nil {
+				return err
+			}
+			eTyp, eContent, eBlock, eTx, eLog, err := types.EntryFields(e)
+			if err != nil {
+				return err
+			}
+			if uint32(eTyp) != value.typ || !bytes.Equal(eContent, value.content) {
+				break
+			}
+			p := types.IndexPosition{BlockNumber: eBlock, TxIndex: eTx, LogIndex: eLog}
+			if p.Compare(last) > 0 {
+				break
+			}
+			tp.valueEntries = append(tp.valueEntries, pos)
+		}
+	}
+	return nil
 }
 
 func (tp *tableProver) addBlockProofs(newProofs map[uint64]*blockProof, newResults int) {
@@ -96,6 +130,7 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.H
 		}
 		proof.EntryIndices = append(proof.EntryIndices, entryIndex)
 	}
+	proof.EntryIndices = append(proof.EntryIndices, tp.valueEntries...)
 	for _, blockNumber := range blockNumbers {
 		bp := tp.blockProofs[blockNumber]
 		if blockNumber != tp.reader.BlockRange().Last() {
@@ -103,6 +138,7 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.H
 		}
 		for _, mtx := range bp.matchingTxs {
 			proof.EntryIndices = append(proof.EntryIndices, mtx.txEntryIndex)
+			proof.EntryIndices = append(proof.EntryIndices, mtx.logEntries...)
 		}
 	}
 	if refHeader != nil {
@@ -264,6 +300,9 @@ type blockProof struct {
 type matchingTx struct {
 	txEntryIndex      uint64
 	receiptProofAdded bool
+	// logEntries holds the index entry of every matched log of the
+	// transaction for each value the query pattern searches for
+	logEntries []uint64
 }
 
 func newBlockProof(header *types.Header, blockEntryIndex uint64) *blockProof {

@@ -189,6 +189,11 @@ func PreExecution(ctx context.Context, beaconRoot *common.Hash, parent *types.He
 	if config.IsPrague(number, time) || config.IsUBT(number, time) {
 		ProcessParentBlockHash(parent.Hash(), evm, blockAccessList)
 	}
+	// EIP-8304: chains whose genesis does not pre-deploy the index contract
+	// get it at fork activation, before the first table of the fork is built
+	if config.IsAmsterdam(number, time) {
+		deployIndexContract(evm, blockAccessList)
+	}
 	return blockAccessList
 }
 
@@ -366,6 +371,30 @@ func ProcessBeaconBlockRoot(beaconRoot common.Hash, evm *vm.EVM, blockAccessList
 	evm.StateDB.SetTxContext(common.Hash{}, 0, 0)
 	evm.StateDB.AddAddressToAccessList(params.BeaconRootsAddress)
 	_, _, _ = evm.Call(msg.From, *msg.To, msg.Data, gasBudget, common.U2560)
+	if evm.StateDB.AccessEvents() != nil {
+		evm.StateDB.AccessEvents().Merge(evm.AccessEvents)
+	}
+	blockAccessList.Merge(evm.StateDB.Finalise(evm.GetRules()))
+}
+
+// deployIndexContract deploys the EIP-8304 index contract on chains whose
+// genesis does not pre-deploy it: a fork-activation code write recorded in
+// the block access list at the pre-execution index like the other
+// pre-execution system calls. Genesis-deployed chains skip this entirely.
+func deployIndexContract(evm *vm.EVM, blockAccessList *bal.ConstructionBlockAccessList) {
+	if evm.StateDB.GetCodeSize(params.IndexContractAddress) != 0 {
+		return
+	}
+	if tracer := evm.Config.Tracer; tracer != nil {
+		onSystemCallStart(tracer, evm.GetVMContext())
+		if tracer.OnSystemCallEnd != nil {
+			defer tracer.OnSystemCallEnd()
+		}
+	}
+	evm.StateDB.Prepare(evm.GetRules(), common.Address{}, common.Address{}, nil, nil, nil)
+	evm.StateDB.SetTxContext(common.Hash{}, 0, 0)
+	evm.StateDB.AddAddressToAccessList(params.IndexContractAddress)
+	evm.StateDB.SetCode(params.IndexContractAddress, params.IndexContractCode, tracing.CodeChangeUnspecified)
 	if evm.StateDB.AccessEvents() != nil {
 		evm.StateDB.AccessEvents().Merge(evm.AccessEvents)
 	}

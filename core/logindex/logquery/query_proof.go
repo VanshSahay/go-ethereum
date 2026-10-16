@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"math/bits"
 	"sort"
@@ -232,10 +233,10 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 			results[uint64(number)<<32|uint64(txi)] = blockLogs
 		}
 	}
-	// the potential match set implied by the proven entries, for the whole
-	// table range (the query range is already checked above)
-	begin := types.IndexPosition{BlockNumber: tqp.FirstBlock}
-	end := types.IndexPosition{BlockNumber: tqp.FirstBlock + tqp.TableSize - 1, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
+	// the potential match set implied by the proven entries, for the scanned
+	// part of the table (the intersection of the table with the query range)
+	begin := types.IndexPosition{BlockNumber: max(tqp.FirstBlock, queryFirst)}
+	end := types.IndexPosition{BlockNumber: min(tqp.FirstBlock+tqp.TableSize-1, queryLast), TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
 	potential := query.Pattern.proofMatches(tqp, begin, end)
 	// the inclusion/exclusion cross-check: for every proven log position,
 	// the pattern's verdict must agree with the potential set membership
@@ -254,7 +255,7 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 			matched := query.Pattern.matchLogs(blockLogs, i)
 			contained := potential.contains(pos)
 			if matched != contained {
-				return nil, nil, nil, nil, errors.New("inclusion and exclusion proofs do not match")
+				return nil, nil, nil, nil, fmt.Errorf("inclusion and exclusion proofs do not match at block #%d tx %d log %d (pattern=%v entries=%v)", blockNumber, pos.TxIndex, pos.LogIndex, matched, contained)
 			}
 			if matched {
 				allLogs = append(allLogs, log)

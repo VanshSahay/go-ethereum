@@ -424,6 +424,14 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 			evm := vm.NewEVM(blockContext, statedb, cm.config, vm.Config{})
 			ProcessBeaconBlockRoot(*b.header.ParentBeaconRoot, evm, b.bal)
 		}
+		// EIP-8304: the fork-activation deployment of the index contract for
+		// chains whose genesis does not pre-deploy it
+		if cm.config.IsAmsterdam(b.header.Number, b.header.Time) {
+			blockContext := NewEVMBlockContext(b.header, cm, &b.header.Coinbase)
+			blockContext.Random = &common.Hash{} // enable post-merge instruction set
+			evm := vm.NewEVM(blockContext, statedb, cm.config, vm.Config{})
+			deployIndexContract(evm, b.bal)
+		}
 
 		requests, bal := b.collectRequests(false)
 		if requests != nil {

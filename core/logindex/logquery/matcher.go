@@ -198,6 +198,13 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		if err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
+		scanFirst, scanLast := firstPos, lastPos
+		if query.LimitLatest {
+			scanFirst, scanLast = lastPos, firstPos
+		}
+		if err := mp.prover.proveValueEntries(query.Pattern.proofValues(), scanFirst, scanLast); err != nil {
+			return nil, common.Range[uint64]{}, nil, err
+		}
 		mp.prover.addBlockProofs(mp.blockProofs, count)
 		allLogs = append(allLogs, mp.allMatches...)
 		provers = append(provers, prover)
@@ -356,8 +363,9 @@ func (mp *matcherProcess) updateLastMatchBlock(number uint64) error {
 	return nil
 }
 
-// finalizeLastMatchBlock derives the pending block's receipt fields and
-// records its block proof.
+// finalizeLastMatchBlock derives the pending block's receipt fields, proves
+// the index entries of every claimed transaction's logs and records the block
+// proof.
 func (mp *matcherProcess) finalizeLastMatchBlock() error {
 	if mp.lastHeader == nil {
 		return nil
@@ -367,12 +375,44 @@ func (mp *matcherProcess) finalizeLastMatchBlock() error {
 		return err
 	}
 	if mp.lastBlockProof != nil {
+		// every log of every claimed transaction needs its address and topic
+		// entries proven: the verifier's exclusion cross-check reconstructs
+		// the potential match set from the proven entries, and an unproven
+		// entry between two proven ones would wrongly cover the log
+		// positions around it
+		blockNumber := header.Number.Uint64()
+		for txi, mtx := range mp.lastBlockProof.matchingTxs {
+			for logIdx, log := range receipts[txi].Logs {
+				addressEntry := types.EncodeEntry(types.EntryTypeLogAddress, log.Address[:], blockNumber, txi, uint32(logIdx))
+				mp.appendLogEntry(&mtx, addressEntry)
+				for topicIdx, topic := range log.Topics {
+					if topicIdx >= logindex.MaxTopicCount {
+						break
+					}
+					topicEntry := types.EncodeEntry(types.EntryTypeLogTopic0+types.EntryType(topicIdx), topic[:], blockNumber, txi, uint32(logIdx))
+					mp.appendLogEntry(&mtx, topicEntry)
+				}
+			}
+			mp.lastBlockProof.matchingTxs[txi] = mtx
+		}
 		mp.lastBlockProof.createProof(receipts)
 		mp.blockProofs[header.Number.Uint64()] = mp.lastBlockProof
 		mp.lastBlockProof = nil
 	}
 	mp.lastHeader, mp.lastBody, mp.lastReceipts = nil, nil, nil
 	return nil
+}
+
+// appendLogEntry looks up a log's index entry and records it in the
+// transaction's proof material.
+func (mp *matcherProcess) appendLogEntry(mtx *matchingTx, entry types.IndexEntry) {
+	entryIndex, found, err := mp.tableReader.SeekEntry(entry)
+	if err != nil {
+		return
+	}
+	if found {
+		mtx.logEntries = append(mtx.logEntries, entryIndex)
+	}
 }
 
 // chainConfig returns the chain config of the first proven block's context;
@@ -430,7 +470,7 @@ func (mp *matcherProcess) addMatch(pos *types.IndexPosition) error {
 				return err
 			}
 			if !found {
-				return errors.New("could not find transaction entry index")
+				return errors.New("could not find transaction entry index at block " + itoa(pos.BlockNumber) + " tx " + itoa(uint64(pos.TxIndex)))
 			}
 			blockProof.matchingTxs[pos.TxIndex] = matchingTx{txEntryIndex: txEntryIndex}
 		}

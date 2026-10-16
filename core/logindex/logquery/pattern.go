@@ -40,6 +40,10 @@ type PatternMatcher interface {
 	newInstance(ctx context.Context, reader *directionalReader, first, last types.IndexPosition) matcherInstance
 	matchLogs(logs []*types.Log, index int) bool
 	proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet
+	// proofValues lists the leaf entry values the pattern searches for: the
+	// prover proves every entry of these values in the scanned range so the
+	// verifier can reconstruct the exact potential match set.
+	proofValues() []matcherValue
 	json.Marshaler
 }
 
@@ -310,6 +314,10 @@ func (m *singleMatcher) proofMatches(tqp *tableQueryProof, begin, end types.Inde
 	return tqp.getValueMatches(m.value.typ, m.value.content, begin, end)
 }
 
+func (m *singleMatcher) proofValues() []matcherValue {
+	return []matcherValue{m.value}
+}
+
 func (m *singleMatcher) MarshalJSON() ([]byte, error) {
 	enc := struct {
 		Type  string      `json:"field"`
@@ -452,6 +460,10 @@ func (m *offsetMatcher) matchLogs(logs []*types.Log, index int) bool {
 	return m.child.matchLogs(logs, index)
 }
 
+func (m *offsetMatcher) proofValues() []matcherValue {
+	return m.child.proofValues()
+}
+
 func (m *offsetMatcher) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {
 	addOffset(&begin, m.offset)
 	addOffset(&end, m.offset)
@@ -543,6 +555,14 @@ func (m matchAny) matchLogs(logs []*types.Log, index int) bool {
 		}
 	}
 	return false
+}
+
+func (m matchAny) proofValues() []matcherValue {
+	var values []matcherValue
+	for _, sub := range m {
+		values = append(values, sub.proofValues()...)
+	}
+	return values
 }
 
 func (m matchAny) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {
@@ -639,6 +659,14 @@ func (m matchAll) matchLogs(logs []*types.Log, index int) bool {
 		}
 	}
 	return true
+}
+
+func (m matchAll) proofValues() []matcherValue {
+	var values []matcherValue
+	for _, sub := range m {
+		values = append(values, sub.proofValues()...)
+	}
+	return values
 }
 
 func (m matchAll) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {

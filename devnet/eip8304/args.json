@@ -1,0 +1,48 @@
+{
+  "additional_services": [
+    "spamoor"
+  ],
+  "spamoor_params": {
+    "spammers": [
+      {
+        "name": "EOA transfers",
+        "scenario": "eoatx",
+        "config": {
+          "throughput": 40,
+          "max_pending": 80,
+          "max_wallets": 100,
+          "base_fee": 20
+        }
+      },
+      {
+        "name": "ERC-20 transfers",
+        "scenario": "erc20tx",
+        "config": {
+          "throughput": 40,
+          "max_pending": 80,
+          "max_wallets": 100
+        }
+      }
+    ]
+  },
+  "participants": [
+    {
+      "el_type": "geth",
+      "el_image": "my-geth:8304",
+      "cl_type": "lighthouse",
+      "cl_image": "ethpandaops/lighthouse:unstable",
+      "supernode": true,
+      "count": 1,
+      "el_extra_params": [
+        "--http.api=admin,engine,net,eth,web3,debug,txpool,testing,pureth",
+        "--ws.api=admin,engine,net,eth,web3,debug,txpool,pureth"
+      ]
+    }
+  ],
+  "network_params": {
+    "gloas_fork_epoch": 0,
+    "seconds_per_slot": 4,
+    "num_validator_keys_per_node": 128,
+    "genesis_delay": 5
+  }
+}

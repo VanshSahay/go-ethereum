@@ -2855,6 +2855,7 @@ func (bc *BlockChain) SetCanonical(head *types.Block) (common.Hash, error) {
 
 	// Emit events
 	receipts, logs := bc.collectReceiptsAndLogs(head, false)
+	bc.indexBlock(head, receipts)
 
 	bc.chainFeed.Send(ChainEvent{
 		Header:       head.Header(),
