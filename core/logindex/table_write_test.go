@@ -86,7 +86,7 @@ func TestGetRangeReadersDecomposition(t *testing.T) {
 		common.NewRange[uint64](1, 600),
 		common.NewRange[uint64](513, 88),
 	} {
-		readers := ix.storage.getRangeReaders(r)
+		readers := ix.storage.getRangeReaders(r, 0)
 		cover := make([]common.Range[uint64], 0, len(readers))
 		for _, tr := range readers {
 			cover = append(cover, tr.BlockRange())
@@ -113,6 +113,48 @@ func TestGetRangeReadersDecomposition(t *testing.T) {
 			if !covered[b] {
 				t.Fatalf("range %v: block %d not covered", r, b)
 			}
+		}
+	}
+}
+
+// TestGetRangeReadersPublicationFilter pins that the decomposition restricted
+// to tables published by a given block stays contiguous: the unpublished
+// higher-level ranges are covered by the published lower-level tables.
+func TestGetRangeReadersPublicationFilter(t *testing.T) {
+	f := newTestFeed(600)
+	ix := NewMemoryIndexer()
+	defer ix.Stop()
+
+	for i := 1; i <= 600; i++ {
+		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
+	}
+	waitIdle(t, ix)
+
+	r := common.NewRange[uint64](1, 500)
+	readers := ix.storage.getRangeReaders(r, 500)
+	cover := make([]common.Range[uint64], 0, len(readers))
+	for _, tr := range readers {
+		br := tr.BlockRange()
+		if PublicationSchedule(br.Count(), br.First()) > 500 {
+			t.Errorf("table [%d..%d) published after the filter", br.First(), br.AfterLast())
+		}
+		cover = append(cover, br)
+	}
+	sort.Slice(cover, func(i, j int) bool { return cover[i].First() < cover[j].First() })
+	for i := 1; i < len(cover); i++ {
+		if cover[i].First() != cover[i-1].AfterLast() {
+			t.Errorf("gap between %v and %v", cover[i-1], cover[i])
+		}
+	}
+	covered := make(map[uint64]bool)
+	for _, c := range cover {
+		for b := c.First(); b <= c.Last(); b++ {
+			covered[b] = true
+		}
+	}
+	for b := r.First(); b <= r.Last(); b++ {
+		if !covered[b] {
+			t.Fatalf("block %d not covered by published tables", b)
 		}
 	}
 }

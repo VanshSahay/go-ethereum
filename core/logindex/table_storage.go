@@ -179,8 +179,10 @@ func (ts *tableStorage) getTableReader(id tableID) (*TableReader, error) {
 }
 
 // getRangeReaders decomposes the given block range into the available complete
-// tables, highest level first.
-func (ts *tableStorage) getRangeReaders(blockRange common.Range[uint64]) []*TableReader {
+// tables, highest level first. When publishedBefore is nonzero, tables
+// published after that block are excluded and their ranges are covered by the
+// lower-level tables below them.
+func (ts *tableStorage) getRangeReaders(blockRange common.Range[uint64], publishedBefore uint64) []*TableReader {
 	ts.lock.Lock()
 	defer ts.lock.Unlock()
 
@@ -188,6 +190,16 @@ func (ts *tableStorage) getRangeReaders(blockRange common.Range[uint64]) []*Tabl
 	rs := common.SingleRangeSet[uint64](blockRange)
 	for level := len(ts.params.tableLevels) - 1; level >= 0; level-- {
 		avail := ts.complete[level].Intersection(shiftRangeSetLevel(rs, ts.params.tableLevels[0], ts.params.tableLevels[level], true))
+		if publishedBefore != 0 {
+			var provable common.RangeSet[uint64]
+			count := ts.params.tableLevels[level].blockCount
+			for index := range avail.Iter() {
+				if PublicationSchedule(count, index*count) <= publishedBefore {
+					provable = provable.Union(common.SingleRangeSet[uint64](common.NewRange[uint64](index, 1)))
+				}
+			}
+			avail = provable
+		}
 		for index := range avail.Iter() {
 			id := tableID{level: level, index: index}
 			if tr, ok := ts.readers[id]; ok {

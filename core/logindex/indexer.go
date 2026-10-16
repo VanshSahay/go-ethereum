@@ -382,7 +382,9 @@ func (ix *Indexer) Revert(header *types.Header) {
 
 // GetRangeReaders returns the complete tables covering the given block range,
 // highest level first, clamped to the canonical segment of the reference head.
-func (ix *Indexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.Range[uint64]) []*TableReader {
+// When publishedBefore is nonzero, tables published after that block are
+// excluded: their ranges are covered by the published lower-level tables.
+func (ix *Indexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.Range[uint64], publishedBefore uint64) []*TableReader {
 	ix.lock.Lock()
 	defer ix.lock.Unlock()
 
@@ -394,7 +396,7 @@ func (ix *Indexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.R
 	if blockRange.IsEmpty() {
 		return nil
 	}
-	return ix.storage.getRangeReaders(blockRange)
+	return ix.storage.getRangeReaders(blockRange, publishedBefore)
 }
 
 // HeadBlock returns the block number of the index head.
