@@ -73,7 +73,6 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 	var (
 		allLogs       []*types.Log
 		totalResults  uint64
-		provenTxs     = make(map[uint64]common.Hash) // (block<<32|tx) -> tx hash, from proven tx entries
 		blockEntryOf  = make(map[uint64]common.Hash) // block number -> proven block hash
 		provenResults = make(map[uint64][]*types.Log)
 	)
@@ -102,7 +101,7 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 		if tableRoot != contractRoot {
 			return nil, errors.New("table root mismatch")
 		}
-		logs, blockHashes, txHashes, results, err := tqp.verify(&p.Query, first, queryLast)
+		logs, blockHashes, _, results, err := tqp.verify(&p.Query, first, queryLast)
 		if err != nil {
 			return nil, err
 		}
@@ -110,9 +109,6 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 		totalResults += uint64(len(logs))
 		for number, hash := range blockHashes {
 			blockEntryOf[number] = hash
-		}
-		for key, hash := range txHashes {
-			provenTxs[key] = hash
 		}
 		for key, logs := range results {
 			provenResults[key] = logs
@@ -158,16 +154,23 @@ func toNodeMap(list []hexutil.Bytes) map[common.Hash][]byte {
 	return m
 }
 
+// txMeta is the proven metadata of a transaction entry: its hash and the
+// cumulative log count of the block before it.
+type txMeta struct {
+	hash      common.Hash
+	logOffset uint32
+}
+
 // verify checks one table's proof and returns the re-evaluated logs, the
 // proven block hashes by number, the proven transaction hashes by
 // (block<<32|tx) key and the per-block re-evaluated logs.
-func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uint64) ([]*types.Log, map[uint64]common.Hash, map[uint64]common.Hash, map[uint64][]*types.Log, error) {
+func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uint64) ([]*types.Log, map[uint64]common.Hash, map[uint64]txMeta, map[uint64][]*types.Log, error) {
 	if len(tqp.ProvenEntries) != len(tqp.EntryIndices) {
 		return nil, nil, nil, nil, errors.New("entry count and entry index count mismatch")
 	}
 	var (
 		provenBlocks = make(map[uint64]common.Hash)
-		provenTxs    = make(map[uint64]common.Hash)
+		provenTxs    = make(map[uint64]txMeta)
 	)
 	for i, entryIndex := range tqp.EntryIndices {
 		if i > 0 && entryIndex <= tqp.EntryIndices[i-1] {
@@ -176,7 +179,7 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 		if entryIndex >= tqp.EntryCount {
 			return nil, nil, nil, nil, errors.New("entry index out of range")
 		}
-		typ, content, blockNum, txIdx, _, err := types.EntryFields(tqp.ProvenEntries[i])
+		typ, content, blockNum, txIdx, logIdx, err := types.EntryFields(tqp.ProvenEntries[i])
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -184,7 +187,9 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 		case types.EntryTypeBlock:
 			provenBlocks[blockNum] = common.Hash(content)
 		case types.EntryTypeTransaction:
-			provenTxs[uint64(blockNum)<<32|uint64(txIdx)] = common.Hash(content)
+			// the transaction entry's log index field carries the cumulative
+			// log count of the block before the transaction
+			provenTxs[uint64(blockNum)<<32|uint64(txIdx)] = txMeta{hash: common.Hash(content), logOffset: logIdx}
 		}
 	}
 	var (
@@ -205,7 +210,7 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 			return nil, nil, nil, nil, errors.New("block results are not ascending")
 		}
 		for _, txi := range br.ProvenReceipts {
-			txHash, ok := provenTxs[uint64(number)<<32|uint64(txi)]
+			meta, ok := provenTxs[uint64(number)<<32|uint64(txi)]
 			if !ok {
 				return nil, nil, nil, nil, errors.New("receipt transaction not proven by an index entry")
 			}
@@ -214,13 +219,14 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 				return nil, nil, nil, nil, err
 			}
 			blockLogs := make([]*types.Log, 0, len(receipt.Logs))
-			for _, log := range receipt.Logs {
+			for i, log := range receipt.Logs {
 				clone := *log
-				clone.TxHash = txHash
+				clone.TxHash = meta.hash
 				clone.TxIndex = uint(txi)
 				clone.BlockHash = br.Header.Hash()
 				clone.BlockNumber = number
 				clone.BlockTimestamp = br.Header.Time
+				clone.Index = uint(meta.logOffset) + uint(i)
 				blockLogs = append(blockLogs, &clone)
 			}
 			results[uint64(number)<<32|uint64(txi)] = blockLogs
