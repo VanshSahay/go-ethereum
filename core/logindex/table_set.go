@@ -174,7 +174,13 @@ func (p *Params) nextTableOperations(complete, partial, target tableSet, lowLeve
 	)
 	for i := len(p.tableLevels) - 1; i >= 0; i-- {
 		required = required.Union(target[i])
-		if remove := complete[i].Union(partial[i]).Difference(required); !remove.IsEmpty() {
+		// a partial writer whose table is already complete is the leftover of
+		// an interrupted duplicate merge: the scheduler will neither resume it
+		// (the table is complete) nor treat it as unrequired (the range is
+		// targeted), so it has to be deleted explicitly
+		remove := complete[i].Union(partial[i]).Difference(required)
+		remove = remove.Union(partial[i].Intersection(complete[i]))
+		if !remove.IsEmpty() {
 			// Note that we deliberately only add one delete operation candidate
 			// per level in order to avoid delete operations always interrupting
 			// all merge operations

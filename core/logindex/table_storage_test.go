@@ -277,8 +277,13 @@ func TestReorgWithPendingMerge(t *testing.T) {
 	}
 	waitIdle(t, ix)
 
-	// Start a merge that aborts immediately, leaving a partial writer.
+	// Start a merge that aborts immediately, leaving a partial writer. The
+	// table is removed first: a merge of an already complete table is a no-op
+	// now that concurrent merges of the same table are handled.
 	id := tableID{level: 1, index: 1}
+	if err := ix.storage.deleteTable(id); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ix.mergeTable(id, func() bool { return true }); err != nil {
 		t.Fatal(err)
 	}

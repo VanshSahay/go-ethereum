@@ -80,6 +80,11 @@ func (ix *Indexer) mergeTable(id tableID, stopFn func() bool) (finalized bool, f
 	if id.level == 0 {
 		panic("cannot merge table on the lowest level")
 	}
+	// the table may have been completed by a concurrent merge while this
+	// operation was scheduled
+	if _, err := ix.storage.getTableReader(id); err == nil {
+		return true, nil
+	}
 	sourceIndices := shiftRangeLevel(common.NewRange[uint64](id.index, 1), ix.params.tableLevels[id.level], ix.params.tableLevels[id.level-1], false)
 	readers := make([]*TableReader, sourceIndices.Count())
 	var entryCount uint64
@@ -93,6 +98,11 @@ func (ix *Indexer) mergeTable(id tableID, stopFn func() bool) (finalized bool, f
 	}
 	tw, err := ix.storage.getTableWriter(id)
 	if err == errTableNotFound {
+		// re-check after the sources were opened: a concurrent merge may have
+		// completed the table in the meantime
+		if _, err := ix.storage.getTableReader(id); err == nil {
+			return true, nil
+		}
 		tw, err = ix.storage.addNewTableWriter(id, entryCount)
 		if err != nil {
 			return false, err

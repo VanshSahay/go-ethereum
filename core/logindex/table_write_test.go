@@ -47,8 +47,9 @@ func TestTableWritesForBlockSchedule(t *testing.T) {
 		}
 		for level := 1; level < len(TableSizes); level++ {
 			size := TableSizes[level]
-			first := uint64(i) - uint64(i)%size
-			due := PublicationSchedule(size, first) == uint64(i)
+			delay := size + size/4 - 1
+			first := uint64(i) - delay
+			due := uint64(i) > delay && first%size == 0 && PublicationSchedule(size, first) == uint64(i)
 			var write *TableWrite
 			for j, w := range writes {
 				if w.TableSize == size {
@@ -63,11 +64,6 @@ func TestTableWritesForBlockSchedule(t *testing.T) {
 			}
 		}
 		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
-		if i >= 28 && i <= 33 {
-			ix.lock.Lock()
-			t.Logf("after block %d: hasProcessed=%v num=%d head=%d", i, ix.hasProcessedBlock, ix.processedBlockNumber, ix.headBlock)
-			ix.lock.Unlock()
-		}
 	}
 	waitIdle(t, ix)
 }

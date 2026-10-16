@@ -56,16 +56,21 @@ func BuildLevel0Root(blockNumber uint64, parentHash common.Hash, receipts types.
 // Higher-level tables are merged on the spot when not already available.
 func (ix *Indexer) TableWritesForBlock(blockNumber uint64, parentHash common.Hash, receipts types.Receipts) ([]TableWrite, error) {
 	ix.lock.Lock()
-	if blockNumber >= 45 && blockNumber <= 47 {
-	}
 	if ix.hasProcessedBlock {
-		if err := ix.storage.deleteTable(tableID{level: 0, index: ix.processedBlockNumber}); err != nil {
+		if err := ix.storage.deleteTable(tableID{level: 0, index: ix.processedBlockNumber}); err != nil && err != errTableNotFound {
 			ix.lock.Unlock()
 			return nil, err
 		}
 		ix.hasProcessedBlock = false
 	}
 	indexHeadHash := ix.headBlockHash
+	// Mark the block pending before the writer is created: the index head
+	// stays at the parent until AddBlockData seals it, so the scheduler would
+	// otherwise see the new level-0 table as unrequired while it is being
+	// filled. It is resolved by AddBlockData with the real block hash.
+	ix.hasProcessedBlock = true
+	ix.processedBlockNumber = blockNumber
+	ix.processedBlockId = common.Hash{}
 	ix.lock.Unlock()
 
 	if indexHeadHash == (common.Hash{}) {
@@ -80,6 +85,9 @@ func (ix *Indexer) TableWritesForBlock(blockNumber uint64, parentHash common.Has
 		// Speculative or out-of-order processing (side chain, replay): the
 		// level-0 root is still consensus-exact, but higher-level tables
 		// depend on the maintained table state and are skipped.
+		ix.lock.Lock()
+		ix.hasProcessedBlock = false
+		ix.lock.Unlock()
 		return []TableWrite{{FirstBlock: blockNumber, TableSize: 1, Root: BuildLevel0Root(blockNumber, parentHash, receipts)}}, nil
 	}
 	ix.storage.deleteTablesFromBlock(blockNumber)
@@ -98,22 +106,18 @@ func (ix *Indexer) TableWritesForBlock(blockNumber uint64, parentHash common.Has
 	}
 	root := tw.root()
 
-	ix.lock.Lock()
-	if blockNumber >= 45 && blockNumber <= 47 {
-	}
-	ix.hasProcessedBlock = true
-	ix.processedBlockNumber = blockNumber
-	ix.processedBlockId = common.Hash{} // resolved by AddBlockData with the real hash
-	// The index head stays at the parent: it advances in AddBlockData once the
-	// block is sealed, so the parent-match check of the next processed block
-	// sees the consistent (number, hash) pair.
-	ix.lock.Unlock()
-
 	writes := []TableWrite{{FirstBlock: blockNumber, TableSize: 1, Root: root}}
 	for level := 1; level < len(TableSizes); level++ {
 		size := TableSizes[level]
-		firstBlock := blockNumber - blockNumber%size
-		if PublicationSchedule(size, firstBlock) != blockNumber {
+		// the table whose publication deadline falls on this block: its
+		// range ended ts + ts/4 - 1 blocks ago
+		delay := size + size/4 - 1
+		if blockNumber <= delay {
+			continue
+		}
+		firstBlock := blockNumber - delay
+		// level tables are aligned: first_block must be a multiple of ts
+		if firstBlock%size != 0 || PublicationSchedule(size, firstBlock) != blockNumber {
 			continue
 		}
 		id := tableID{level: level, index: firstBlock / size}
@@ -123,12 +127,18 @@ func (ix *Indexer) TableWritesForBlock(blockNumber uint64, parentHash common.Has
 			// covered source tables; on a fresh indexer close to the fork
 			// they may not all be indexed yet, in which case the publication
 			// is skipped and the table state catches up through the feed.
-			if _, mergeErr := ix.mergeTable(id, func() bool { return false }); mergeErr != nil {
-				log.Warn("Skipping index table publication", "level", id.level, "index", id.index, "error", mergeErr)
-				continue
+			// A concurrent background merge of the same table may claim it
+			// first, so the reader is re-checked after every attempt.
+			for attempt := 0; attempt < 3; attempt++ {
+				if _, mergeErr := ix.mergeTable(id, func() bool { return false }); mergeErr != nil && attempt == 2 {
+					log.Warn("Skipping index table publication", "level", id.level, "index", id.index, "error", mergeErr)
+				}
+				if tr, err = ix.storage.getTableReader(id); err == nil {
+					break
+				}
 			}
-			if tr, err = ix.storage.getTableReader(id); err != nil {
-				return nil, err
+			if err != nil {
+				continue
 			}
 		}
 		writes = append(writes, TableWrite{FirstBlock: firstBlock, TableSize: size, Root: tr.TableRoot})
