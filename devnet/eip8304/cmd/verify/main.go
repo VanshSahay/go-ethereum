@@ -71,8 +71,8 @@ func main() {
 	}
 }
 
-// tamper flips one byte of the hex string at the given top-level JSON array
-// index, producing a proof that must be rejected.
+// tamper flips one byte of the hex string at the given index of the proof
+// document, producing a proof that must be rejected.
 func tamper(raw []byte, idx int) ([]byte, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -81,12 +81,24 @@ func tamper(raw []byte, idx int) ([]byte, error) {
 	blob, ok := doc["proof"]
 	if !ok {
 		// a bare proof document
-		blob = json.RawMessage(raw)
-		doc = map[string]json.RawMessage{"proof": blob}
+		blob = raw
 	}
-	// collect every hex string in the proof document
+	// collect every hex string in the proof material: the query and the
+	// reference header are skipped because they are the claim's inputs, not
+	// proof material, and modifying them yields a different, self-consistent
+	// claim rather than a broken proof
 	var hexStrings []string
-	forEachJSONString(blob, func(s string) {
+	var doc2 map[string]json.RawMessage
+	if err := json.Unmarshal(blob, &doc2); err != nil {
+		return nil, err
+	}
+	delete(doc2, "query")
+	delete(doc2, "refHeader")
+	material, err := json.Marshal(doc2)
+	if err != nil {
+		return nil, err
+	}
+	forEachJSONString(material, func(s string) {
 		if strings.HasPrefix(s, "0x") && len(s) >= 10 {
 			hexStrings = append(hexStrings, s)
 		}
@@ -103,8 +115,7 @@ func tamper(raw []byte, idx int) ([]byte, error) {
 	replacement := "0x" + hex.EncodeToString(b)
 	fmt.Printf("tampering: %s -> %s\n", target[:min(len(target), 20)]+"…", replacement[:min(len(replacement), 20)]+"…")
 	patched := strings.Replace(string(blob), target, replacement, 1)
-	doc["proof"] = json.RawMessage(patched)
-	return json.Marshal(doc)
+	return []byte(patched), nil
 }
 
 func forEachJSONString(v json.RawMessage, fn func(string)) {
