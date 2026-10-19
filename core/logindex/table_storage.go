@@ -358,6 +358,12 @@ func (ts *tableStorage) finalizeTableWriter(id tableID) error {
 	}
 	ts.readers[id] = tr
 	ts.complete.add(id)
+	if ts.tf != nil {
+		// a freshly finalized table may be backed by in-memory chunks: count
+		// it toward the periodic memory table flush
+		ts.tf.memFinalized()
+		ts.tf.flushMemTables()
+	}
 	if ch, ok := ts.triggers[id]; ok {
 		close(ch)
 		delete(ts.triggers, id)

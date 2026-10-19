@@ -1380,6 +1380,12 @@ func (bc *BlockChain) stopWithoutSaving() {
 	// Signal shutdown to all goroutines.
 	bc.InterruptInsert(true)
 
+	// Stop the log index: its merge thread winds down and the in-memory
+	// small tables are flushed to disk before the process exits.
+	if bc.logIndex != nil {
+		bc.logIndex.Stop()
+	}
+
 	// Now wait for all chain modifications to end and persistent goroutines to exit.
 	//
 	// Note: Close waits for the mutex to become available, i.e. any running chain

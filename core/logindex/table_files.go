@@ -57,6 +57,7 @@ type tableFiles struct {
 	osFiles       map[osFileID]*osFileInfo // finished files only
 	tableFiles    map[string]*tableFileInfo
 	memFileTotal  int64
+	memNewTables  int
 }
 
 type osFileID struct {
@@ -222,8 +223,41 @@ func (tf *tableFiles) loadMemTables() {
 	}
 }
 
+// memFlushThreshold is the number of finalized in-memory tables after which
+// the memory table file is rewritten: a crash between flushes loses only the
+// tables finalized since the last one.
+const memFlushThreshold = 64
+
+// memFinalized counts a newly finalized in-memory table toward the periodic
+// flush threshold.
+func (tf *tableFiles) memFinalized() {
+	tf.lock.Lock()
+	tf.memNewTables++
+	tf.lock.Unlock()
+}
+
+// flushMemTables rewrites the memory table file once memFlushThreshold
+// in-memory tables have finalized since the last flush.
+func (tf *tableFiles) flushMemTables() {
+	tf.lock.Lock()
+	if tf.memNewTables < memFlushThreshold {
+		tf.lock.Unlock()
+		return
+	}
+	tf.memNewTables = 0
+	memTables := tf.collectMemTablesLocked()
+	tf.lock.Unlock()
+	tf.writeMemTables(memTables)
+}
+
 func (tf *tableFiles) storeMemTables() {
 	tf.lock.Lock()
+	memTables := tf.collectMemTablesLocked()
+	tf.lock.Unlock()
+	tf.writeMemTables(memTables)
+}
+
+func (tf *tableFiles) collectMemTablesLocked() []storedMemTable {
 	var memTables []storedMemTable
 	for name, fi := range tf.tableFiles {
 		if fi.fileCount != 0 {
@@ -234,14 +268,21 @@ func (tf *tableFiles) storeMemTables() {
 			Data: fi.memData,
 		})
 	}
-	tf.lock.Unlock()
-	f, err := os.OpenFile(filepath.Join(tf.path, memFileName), os.O_CREATE|os.O_WRONLY, 0644)
+	return memTables
+}
+
+func (tf *tableFiles) writeMemTables(memTables []storedMemTable) {
+	fn := filepath.Join(tf.path, memFileName)
+	f, err := os.OpenFile(fn+".tmp", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err == nil {
 		err = rlp.Encode(f, memTables)
 		err2 := f.Close()
 		if err == nil {
 			err = err2
 		}
+	}
+	if err == nil {
+		err = os.Rename(fn+".tmp", fn)
 	}
 	if err != nil {
 		log.Error("Could not save small index table files", "error", err)
