@@ -452,11 +452,12 @@ func (ix *Indexer) MissingBlocks() common.RangeSet[uint64] {
 	if initPhase {
 		return nil
 	}
-	start := max(ix.tailBlock(), 1)
-	if start > ix.headBlock {
-		return nil
+	// only blocks some level still wants a table for: the lower levels drop
+	// the old blocks on purpose (see makeTargetSet)
+	var missing common.RangeSet[uint64]
+	for level, rs := range ix.makeTargetSet(complete) {
+		missing = missing.Union(shiftRangeSetLevel(rs, ix.params.tableLevels[level], ix.params.tableLevels[0], false))
 	}
-	missing := common.SingleRangeSet[uint64](common.NewRange[uint64](start, ix.headBlock+1-start))
 	for level, rs := range complete {
 		covered := shiftRangeSetLevel(rs, ix.params.tableLevels[level], ix.params.tableLevels[0], false)
 		missing = missing.Difference(covered)

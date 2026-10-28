@@ -42,7 +42,7 @@ verify_proof() {
   local ref_number ref_hash
   ref_number=$(jq -r '.refHeader.number' "$proof")
   ref_hash=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
-  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":10000,"limitLatest":false%s}' "$topic" "${VFROM:-$FROM}" "${VTO:-$TO}" "${VCURSOR:-}" > "$OUT/query.json"
+  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":%s,"limitLatest":%s%s}' "$topic" "${VFROM:-$FROM}" "${VTO:-$TO}" "${VLIMIT:-10000}" "${VLATEST:-false}" "${VCURSOR:-}" > "$OUT/query.json"
   ( cd "$REPO" && go run ./devnet/eip8304/cmd/verify -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@" )
 }
 
@@ -94,7 +94,10 @@ done
 echo
 echo "== query parity: pureth_getLogsWithProofV1 vs eth_getLogs =="
 # one proven query returns at most 10000 logs (the RPC default); longer ranges are paged
-FROM=$((DEPLOY + 2))
+# blocks below the first 16 have no table above level 1 (none covers the
+# genesis block) and age out of the lowest levels, so start at the first full
+# 16-block table
+FROM=$((DEPLOY + 15))
 TO=$((HEAD - 2))
 GETLOGS_PARAMS=$(printf '{"fromBlock":"0x%x","toBlock":"0x%x","topics":[["%s"]]}' "$FROM" "$TO" "$TRANSFER")
 cast rpc --rpc-url "$RPC" eth_getLogs "$GETLOGS_PARAMS" > "$OUT/getlogs.json"
@@ -186,6 +189,43 @@ for MODE in none drop-block forge-contract bad-ref truncate-range flip-hash; do
     fi
   fi
 done
+
+echo
+echo "== retained levels: an old range and a reverse (limitLatest) cursor walk =="
+# once the head is past the level-0 window the lowest levels no longer hold the
+# old blocks: the old range is served and proven by the higher levels
+OLD_FROM=$((DEPLOY + 19))
+OLD_TO=$((OLD_FROM + 60))
+OLD_PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"}' "$TRANSFER" "$OLD_FROM" "$OLD_TO")
+cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$OLD_PARAMS" > "$OUT/old.json"
+jq '.proof' "$OUT/old.json" > "$OUT/old_proof.json"
+VFROM=$OLD_FROM VTO=$OLD_TO verify_proof "$OUT/old_proof.json" "$TRANSFER"
+echo "old range $OLD_FROM..$OLD_TO: $(jq '.logs | length' "$OUT/old.json") logs verified at head $(head_number)"
+
+# newest-first walk over a short range with a small limit
+REV_TO=$((DEPLOY + 40))
+REV_LIMIT=500
+CURSOR=""
+REV_VCURSOR=""
+LAST_BLOCK=$REV_TO
+REV_TOTAL=0
+for REV_PAGE in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+  PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x","limit":"0x%x","limitLatest":true%s}' "$TRANSFER" "$FROM" "$LAST_BLOCK" "$REV_LIMIT" "$CURSOR")
+  cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$PARAMS" > "$OUT/rev$REV_PAGE.json"
+  jq '.proof' "$OUT/rev$REV_PAGE.json" > "$OUT/revproof$REV_PAGE.json"
+  VFROM=$FROM VTO=$LAST_BLOCK VLIMIT=$REV_LIMIT VLATEST=true VCURSOR=$REV_VCURSOR verify_proof "$OUT/revproof$REV_PAGE.json" "$TRANSFER" > "$OUT/revverify$REV_PAGE.log" 2>&1 || { cat "$OUT/revverify$REV_PAGE.log" >&2; echo "reverse page $REV_PAGE failed verification" >&2; exit 1; }
+  REV_TOTAL=$((REV_TOTAL + $(jq '.logs | length' "$OUT/rev$REV_PAGE.json")))
+  NEXT=$(jq -r '.nextCursor // empty' "$OUT/rev$REV_PAGE.json")
+  [ -z "$NEXT" ] && break
+  NB=$(( $(jq -r '.nextCursor.block' "$OUT/rev$REV_PAGE.json") ))
+  NI=$(( $(jq -r '.nextCursor.logIndex' "$OUT/rev$REV_PAGE.json") ))
+  CURSOR=$(printf ',"cursor":{"block":"0x%x","logIndex":"0x%x"}' "$NB" "$NI")
+  REV_VCURSOR=$(printf ',"cursor":{"block":%d,"logIndex":%d}' "$NB" "$NI")
+  LAST_BLOCK=$NB
+done
+WANT=$(cast rpc --rpc-url "$RPC" eth_getLogs "$(printf '{"fromBlock":"0x%x","toBlock":"0x%x","topics":[["%s"]]}' "$FROM" "$REV_TO" "$TRANSFER")" | jq 'length')
+echo "reverse walk: $((REV_PAGE + 1)) pages, $REV_TOTAL logs (eth_getLogs: $WANT)"
+[ "$REV_TOTAL" -eq "$WANT" ] || { echo "REVERSE WALK FAIL" >&2; exit 1; }
 
 echo
 echo "== absence proof (querying a log that never happened) =="

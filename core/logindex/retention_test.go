@@ -55,6 +55,11 @@ func TestLevelRetention(t *testing.T) {
 	// no level-2 table and are only held by the levels that have aged out
 	coverageGaps(t, ix, 16, blocks+1)
 
+	// blocks the levels dropped on purpose are not reported as holes to repair
+	if missing := ix.MissingBlocks(); !missing.IsEmpty() {
+		t.Errorf("retained index reports missing blocks %v", missing)
+	}
+
 	// the scheduler has settled: nothing left to merge or delete
 	ix.lock.Lock()
 	defer ix.lock.Unlock()

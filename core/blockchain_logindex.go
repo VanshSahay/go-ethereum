@@ -148,6 +148,11 @@ func (bc *BlockChain) reconcileLogIndex(head *types.Header) {
 		ix.Revert(old)
 	}
 	for i := len(path) - 1; i >= 0; i-- {
+		select {
+		case <-bc.logIndexQuit:
+			return
+		default:
+		}
 		header := path[i]
 		if header.Number.Sign() == 0 {
 			continue // the genesis block has no entries to index
@@ -175,6 +180,11 @@ func (bc *BlockChain) backfillLogIndex(head *types.Header) {
 	}
 	done := 0
 	for n := range missing.Iter() {
+		select {
+		case <-bc.logIndexQuit:
+			return // shutting down: do not hold up the chain's stop
+		default:
+		}
 		if done >= logIndexBackfillBatch {
 			return
 		}
