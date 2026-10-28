@@ -96,12 +96,24 @@ type ChainView interface {
 type Matcher struct {
 	logIndex              logIndex
 	contractProverBackend contractProverBackend
+
+	// MaxCandidates bounds the number of candidate positions a single table
+	// scan may derive: a query matching more than that is too broad to serve.
+	MaxCandidates int
 }
+
+// DefaultMaxCandidates is the candidate bound of a matcher made by NewMatcher.
+const DefaultMaxCandidates = 1 << 20
+
+// ErrQueryTooBroad is returned when a query derives more candidate positions
+// from the index than the matcher is willing to process.
+var ErrQueryTooBroad = errors.New("query is too broad")
 
 func NewMatcher(logIndex logIndex, contractProverBackend contractProverBackend) *Matcher {
 	return &Matcher{
 		logIndex:              logIndex,
 		contractProverBackend: contractProverBackend,
+		MaxCandidates:         DefaultMaxCandidates,
 	}
 }
 
@@ -161,6 +173,9 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		if prove {
 			prover = newTableProver(tr)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, common.Range[uint64]{}, nil, err
+		}
 		br := tr.BlockRange().Intersection(blockRange)
 		if br.IsEmpty() || limited {
 			continue // beyond the cut: not part of the proven range
@@ -171,6 +186,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 			prover:      prover,
 			pattern:     query.Pattern,
 			reverse:     query.LimitLatest,
+			maxRun:      mc.MaxCandidates,
 			blockProofs: make(map[uint64]*blockProof),
 		}
 		begin := types.IndexPosition{BlockNumber: br.First()}
@@ -218,7 +234,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		if err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
-		if proof, err = makeQueryProof(refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, provers, pin); err != nil {
+		if proof, err = makeQueryProof(ctx, refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, provers, pin); err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
 	}
@@ -273,6 +289,7 @@ type readerSource struct {
 	ctx     context.Context
 	reader  *logindex.TableReader
 	record  bool
+	maxRun  int // longest run the source may return; zero means unbounded
 	touched []uint64
 	err     error
 }
@@ -312,6 +329,10 @@ func (rs *readerSource) valueRun(typ uint32, content []byte, begin, end types.In
 			return nil, false
 		}
 		run = append(run, pos)
+		if rs.maxRun > 0 && len(run) > rs.maxRun {
+			rs.err = ErrQueryTooBroad
+			return nil, false
+		}
 	}
 	if rs.record {
 		if start > 0 {
@@ -337,6 +358,7 @@ type matcherProcess struct {
 	prover    *tableProver
 	pattern   PatternMatcher
 	reverse   bool
+	maxRun    int
 
 	matches        []*types.Log // matching logs in scan order
 	blockProofs    map[uint64]*blockProof
@@ -352,13 +374,16 @@ type matcherProcess struct {
 // processed and returns that block number, or nil if the limit was not
 // reached.
 func (mp *matcherProcess) scan(ctx context.Context, pattern PatternMatcher, begin, end types.IndexPosition, limit int) (*uint64, error) {
-	src := &readerSource{ctx: ctx, reader: mp.reader, record: mp.prover != nil}
+	src := &readerSource{ctx: ctx, reader: mp.reader, record: mp.prover != nil, maxRun: mp.maxRun}
 	candidates, ok := pattern.candidates(src, begin, end)
 	if src.err != nil {
 		return nil, src.err
 	}
 	if !ok {
 		return nil, errors.New("the pattern cannot be evaluated on the index")
+	}
+	if mp.maxRun > 0 && len(candidates) > mp.maxRun {
+		return nil, ErrQueryTooBroad
 	}
 	var cut *uint64
 	for n := range candidates {
@@ -397,7 +422,7 @@ func (mp *matcherProcess) scan(ctx context.Context, pattern PatternMatcher, begi
 			} else {
 				cutEnd = types.IndexPosition{BlockNumber: *cut, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
 			}
-			cutSrc := &readerSource{ctx: ctx, reader: mp.reader, record: true}
+			cutSrc := &readerSource{ctx: ctx, reader: mp.reader, record: true, maxRun: mp.maxRun}
 			pattern.candidates(cutSrc, cutBegin, cutEnd)
 			if cutSrc.err != nil {
 				return nil, cutSrc.err

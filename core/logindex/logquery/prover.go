@@ -17,6 +17,7 @@
 package logquery
 
 import (
+	"context"
 	"errors"
 	"math"
 	"math/bits"
@@ -374,7 +375,7 @@ type pinRequest struct {
 // coverage tables chained through their parent block entries, followed by the
 // optional pin table, with each table root proven against the reference
 // header's state.
-func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver, pin *pinRequest) (*QueryProof, error) {
+func makeQueryProof(ctx context.Context, refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver, pin *pinRequest) (*QueryProof, error) {
 	proof := &QueryProof{
 		Query:            *query,
 		RefHeader:        *refHeader,
@@ -389,6 +390,9 @@ func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, las
 		all = append(slices.Clone(provers), pin.prover)
 	}
 	for i, prover := range all {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		isPin := pin != nil && i == len(all)-1
 		if !isPin && i != 0 && prover.reader.BlockRange().First() != all[i-1].reader.BlockRange().AfterLast() {
 			return nil, errors.New("prover block ranges are not continuous")

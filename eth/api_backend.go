@@ -522,7 +522,7 @@ func (b *EthAPIBackend) LogIndexMatcher() *logquery.Matcher {
 // LogIndexChainView adapts the chain database to the log query's chain view,
 // pinned to the given reference head.
 func (b *EthAPIBackend) LogIndexChainView(refHeader *types.Header) logquery.ChainView {
-	return &logIndexChainView{bc: b.eth.blockchain, head: refHeader}
+	return newLogIndexChainView(b.eth.blockchain, refHeader)
 }
 
 // logIndexProverBackend adapts the blockchain to the query prover's state
@@ -535,21 +535,30 @@ func (b logIndexProverBackend) StateProverAt(header *types.Header, proofNodes, p
 	return b.bc.StateProverAt(header, proofNodes, proofCodes)
 }
 
-// logIndexChainView serves the block data of the canonical chain below the
-// reference head to the log query.
+// logIndexChainView serves the block data of the reference head's ancestry to
+// the log query: it follows the chain by hash from the reference head, so a
+// reorg after the head was resolved cannot mix blocks of two chains.
 type logIndexChainView struct {
 	bc   *core.BlockChain
 	head *types.Header
+	view *filtermaps.ChainView
+}
+
+func newLogIndexChainView(bc *core.BlockChain, head *types.Header) *logIndexChainView {
+	return &logIndexChainView{bc: bc, head: head, view: filtermaps.NewChainView(bc, head.Number.Uint64(), head.Hash())}
 }
 
 func (v *logIndexChainView) HeadNumber() uint64 { return v.head.Number.Uint64() }
 
 func (v *logIndexChainView) Header(number uint64) *types.Header {
-	return v.bc.GetHeaderByNumber(number)
+	if number > v.head.Number.Uint64() {
+		return nil
+	}
+	return v.bc.GetHeader(v.view.BlockHash(number), number)
 }
 
 func (v *logIndexChainView) Body(number uint64) *types.Body {
-	header := v.bc.GetHeaderByNumber(number)
+	header := v.Header(number)
 	if header == nil {
 		return nil
 	}
@@ -557,7 +566,7 @@ func (v *logIndexChainView) Body(number uint64) *types.Body {
 }
 
 func (v *logIndexChainView) RawReceipts(number uint64) types.Receipts {
-	header := v.bc.GetHeaderByNumber(number)
+	header := v.Header(number)
 	if header == nil {
 		return nil
 	}

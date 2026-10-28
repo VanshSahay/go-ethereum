@@ -218,6 +218,26 @@ func TestPurethQueryRejects(t *testing.T) {
 		t.Error("unknown reference block accepted")
 	}
 
+	// pending, above-head, inverted, empty and zero-limit requests
+	addr := &common.Address{1}
+	pending := rpc.BlockNumberOrHash{BlockNumber: ptr(rpc.PendingBlockNumber)}
+	above := rpc.BlockNumberOrHash{BlockNumber: ptr(rpc.BlockNumber(1000))}
+	hu := func(v uint64) *hexutil.Uint64 { x := hexutil.Uint64(v); return &x }
+	for name, args := range map[string]ethapi.PurethQueryArgs{
+		"pending ref":    {RefBlock: &pending, Address: addr},
+		"above-head ref": {RefBlock: &above, Address: addr},
+		"both refs":      {RefBlock: &pending, ReferenceHead: &above, Address: addr},
+		"inverted range": {Address: addr, FirstBlock: hu(5), LastBlock: hu(3)},
+		"zero first":     {Address: addr, FirstBlock: hu(0)},
+		"last above ref": {Address: addr, LastBlock: hu(1000)},
+		"zero limit":     {Address: addr, Limit: hu(0)},
+		"address twice":  {Address: addr, Addresses: []common.Address{{2}}},
+	} {
+		if _, err := api.GetLogsWithProofV1(context.Background(), args); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+
 	// disabled index
 	_, disabledBackend, emitterAddr := newAPIChain(t, 10, true)
 	disabledAPI := ethapi.NewPurethAPI(disabledBackend)
@@ -226,4 +246,4 @@ func TestPurethQueryRejects(t *testing.T) {
 	}
 }
 
-var _ = hexutil.Uint64(0)
+func ptr[T any](v T) *T { return &v }

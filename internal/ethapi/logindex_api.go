@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -45,14 +46,16 @@ type LogIndexBackend interface {
 // filter (address and topics). A completely empty filter is rejected:
 // proving every log of every block is not a sensible query.
 type PurethQueryArgs struct {
-	RefBlock    *rpc.BlockNumberOrHash `json:"refBlock"`
-	Pattern     *json.RawMessage       `json:"pattern"`
-	Address     *common.Address        `json:"address"`
-	Topics      [][]common.Hash        `json:"topics"`
-	FirstBlock  *hexutil.Uint64        `json:"firstBlock"`
-	LastBlock   *hexutil.Uint64        `json:"lastBlock"`
-	Limit       *hexutil.Uint64        `json:"limit"`
-	LimitLatest bool                   `json:"limitLatest"`
+	RefBlock      *rpc.BlockNumberOrHash `json:"refBlock"`
+	ReferenceHead *rpc.BlockNumberOrHash `json:"referenceHead"` // alias of refBlock
+	Pattern       *json.RawMessage       `json:"pattern"`
+	Address       *common.Address        `json:"address"`
+	Addresses     []common.Address       `json:"addresses"`
+	Topics        [][]common.Hash        `json:"topics"`
+	FirstBlock    *hexutil.Uint64        `json:"firstBlock"`
+	LastBlock     *hexutil.Uint64        `json:"lastBlock"`
+	Limit         *hexutil.Uint64        `json:"limit"`
+	LimitLatest   bool                   `json:"limitLatest"`
 }
 
 // PurethQueryResult is the query result with its proof: the matching logs,
@@ -83,9 +86,19 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 	if matcher == nil {
 		return nil, errors.New("log index is not enabled")
 	}
-	refHeader, err := api.refHeader(args.RefBlock)
+	if args.RefBlock != nil && args.ReferenceHead != nil {
+		return nil, errors.New("refBlock and referenceHead are aliases, specify only one")
+	}
+	refBlock := args.RefBlock
+	if refBlock == nil {
+		refBlock = args.ReferenceHead
+	}
+	refHeader, err := api.refHeader(ctx, refBlock)
 	if err != nil {
 		return nil, err
+	}
+	if args.Address != nil && len(args.Addresses) > 0 {
+		return nil, errors.New("specify either address or addresses")
 	}
 	var pattern logquery.PatternMatcher
 	if args.Pattern != nil {
@@ -119,9 +132,24 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 	if args.Limit != nil {
 		query.Limit = uint64(*args.Limit)
 	}
+	if query.Limit == 0 {
+		return nil, errors.New("limit must be positive")
+	}
+	if query.FirstBlock == 0 {
+		return nil, errors.New("firstBlock must be at least 1")
+	}
+	if query.FirstBlock > query.LastBlock {
+		return nil, fmt.Errorf("invalid block range: firstBlock %d is after lastBlock %d", query.FirstBlock, query.LastBlock)
+	}
+	if query.LastBlock > refHeader.Number.Uint64() {
+		return nil, fmt.Errorf("lastBlock %d is above the reference head %d", query.LastBlock, refHeader.Number)
+	}
 	logs, resultRange, proof, err := matcher.GetMatches(ctx, api.backend.LogIndexChainView(refHeader), query, true)
 	if err != nil {
 		return nil, err
+	}
+	if resultRange.IsEmpty() {
+		return nil, errors.New("no block range could be proven")
 	}
 	return &PurethQueryResult{
 		Logs:       logs,
@@ -131,10 +159,30 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 	}, nil
 }
 
-// refHeader resolves the reference head the proof is anchored to.
-func (api *PurethAPI) refHeader(refBlock *rpc.BlockNumberOrHash) (*types.Header, error) {
+// refHeader resolves the canonical reference head the proof is anchored to.
+// Pending blocks, unknown blocks and blocks above the current head are rejected,
+// and a block hash must be on the canonical chain.
+func (api *PurethAPI) refHeader(ctx context.Context, refBlock *rpc.BlockNumberOrHash) (*types.Header, error) {
+	head := api.backend.CurrentBlock()
 	if refBlock == nil {
-		return api.backend.CurrentBlock(), nil
+		return head, nil
 	}
-	return api.backend.HeaderByNumberOrHash(context.Background(), *refBlock)
+	query := *refBlock
+	if number, ok := query.Number(); ok && number == rpc.PendingBlockNumber {
+		return nil, errors.New("the reference head cannot be pending")
+	}
+	if _, ok := query.Hash(); ok {
+		query.RequireCanonical = true
+	}
+	header, err := api.backend.HeaderByNumberOrHash(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, errors.New("reference head not found")
+	}
+	if header.Number.Cmp(head.Number) > 0 {
+		return nil, errors.New("the reference head is above the current head")
+	}
+	return header, nil
 }
