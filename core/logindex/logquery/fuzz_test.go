@@ -110,7 +110,24 @@ func mutate(doc interface{}, pick, op uint32, value uint64) {
 // FuzzVerify checks the verifier's soundness and robustness: a structurally
 // mutated proof must never panic, and if it still verifies it must prove
 // exactly the logs of the honest proof.
-func FuzzVerify(f *testing.F) {
+func FuzzVerify(f *testing.F) { fuzzVerify(f, func(*FilterQuery) {}) }
+
+// FuzzVerifyCursor is FuzzVerify for a resumed forward page.
+func FuzzVerifyCursor(f *testing.F) {
+	fuzzVerify(f, func(req *FilterQuery) {
+		req.FirstBlock, req.Cursor = 10, &Cursor{Block: 10, LogIndex: 1}
+	})
+}
+
+// FuzzVerifyCursorLatest is FuzzVerify for a resumed newest-first page.
+func FuzzVerifyCursorLatest(f *testing.F) {
+	fuzzVerify(f, func(req *FilterQuery) {
+		req.LimitLatest, req.Limit, req.Cursor = true, 6, &Cursor{Block: 25, LogIndex: 0}
+		req.LastBlock = 25
+	})
+}
+
+func fuzzVerify(f *testing.F, tweak func(*FilterQuery)) {
 	rtc := newRTChainWith(f, 40, diffEmitterCode(), func(block int) int { return block%3 + 1 })
 	emitter := crypto.CreateAddress(rtSender, 1)
 	pattern, err := NewPatternMatcherFromJSON(json.RawMessage(fmt.Sprintf(`{"allOf":[%s,%s]}`, addrLeaf(emitter), topicLeaf(0, topicA))))
@@ -118,9 +135,13 @@ func FuzzVerify(f *testing.F) {
 		f.Fatal(err)
 	}
 	req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: 30, Limit: 40}
+	tweak(&req)
 	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
 	if err != nil {
 		f.Fatal(err)
+	}
+	if len(logs) == 0 {
+		f.Fatal("the honest query returns no logs, the fuzz target would be vacuous")
 	}
 	honest, err := json.Marshal(proof)
 	if err != nil {
