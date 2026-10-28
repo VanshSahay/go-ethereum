@@ -140,7 +140,7 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 	// runs (level-0 plus any due higher-level table); without one only the
 	// stateless level-0 root is computed.
 	var tablesToWrite []TableWrite
-	if config.IsAmsterdam(block.Number(), block.Time()) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+	if config.IsEIP8304(block.Number(), block.Time()) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
 		if p.logIndex != nil {
 			var err error
 			tablesToWrite, err = p.logIndex.TableWritesForBlock(block.Number().Uint64(), block.ParentHash(), receipts)
@@ -191,7 +191,7 @@ func PreExecution(ctx context.Context, beaconRoot *common.Hash, parent *types.He
 	}
 	// EIP-8304: chains whose genesis does not pre-deploy the index contract
 	// get it at fork activation, before the first table of the fork is built
-	if config.IsAmsterdam(number, time) {
+	if config.IsEIP8304(number, time) {
 		deployIndexContract(evm, blockAccessList)
 	}
 	return blockAccessList
@@ -236,10 +236,7 @@ func PostExecution(ctx context.Context, config *params.ChainConfig, number *big.
 	}
 
 	// EIP-8304: write log index table roots to the on-chain contract.
-	if config.IsAmsterdam(number, time) {
-		if len(tablesToWrite) > 0 && blockAccessList == nil {
-			blockAccessList = bal.NewConstructionBlockAccessList()
-		}
+	if config.IsEIP8304(number, time) {
 		for _, tw := range tablesToWrite {
 			if err := ProcessLogIndexWrites(tw, rules, evm, blockAccessIndex, blockAccessList); err != nil {
 				return nil, nil, fmt.Errorf("failed to process log index write: %w", err)

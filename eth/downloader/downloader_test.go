@@ -596,6 +596,7 @@ func testCanonSync(t *testing.T, protocol uint, mode SyncMode, snapV2 bool) {
 func makeBALChain(n int) (*core.Genesis, []*types.Block) {
 	config := *params.MergedTestChainConfig
 	config.AmsterdamTime = new(uint64)
+	config.EIP8304Time = new(uint64)
 
 	gspec := &core.Genesis{
 		Config: &config,

@@ -35,7 +35,8 @@
       "count": 1,
       "el_extra_params": [
         "--http.api=admin,engine,net,eth,web3,debug,txpool,testing,pureth",
-        "--ws.api=admin,engine,net,eth,web3,debug,txpool,pureth"
+        "--ws.api=admin,engine,net,eth,web3,debug,txpool,pureth",
+        "--override.eip8304=0"
       ]
     }
   ],

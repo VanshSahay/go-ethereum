@@ -63,6 +63,7 @@ var (
 			utils.CachePreimagesFlag,
 			utils.OverrideOsaka,
 			utils.OverrideAmsterdam,
+			utils.OverrideEIP8304,
 			utils.OverrideBPO1,
 			utils.OverrideBPO2,
 			utils.OverrideUBT,
@@ -291,6 +292,10 @@ func initGenesis(ctx *cli.Context) error {
 	if ctx.IsSet(utils.OverrideAmsterdam.Name) {
 		v := ctx.Uint64(utils.OverrideAmsterdam.Name)
 		overrides.OverrideAmsterdam = &v
+	}
+	if ctx.IsSet(utils.OverrideEIP8304.Name) {
+		v := ctx.Uint64(utils.OverrideEIP8304.Name)
+		overrides.OverrideEIP8304 = &v
 	}
 	if ctx.IsSet(utils.OverrideBPO1.Name) {
 		v := ctx.Uint64(utils.OverrideBPO1.Name)

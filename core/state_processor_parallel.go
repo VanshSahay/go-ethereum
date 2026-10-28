@@ -222,7 +222,7 @@ func (p *StateProcessor) processParallel(ctx context.Context, block *types.Block
 	// EIP-8304: build the index table roots committed by this block; when no
 	// index producer is attached only the stateless level-0 root is computed.
 	var tablesToWrite []TableWrite
-	if config.IsAmsterdam(header.Number, header.Time) && postEVM.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+	if config.IsEIP8304(header.Number, header.Time) && postEVM.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
 		if p.logIndex != nil {
 			tablesToWrite, err = p.logIndex.TableWritesForBlock(header.Number.Uint64(), header.ParentHash, receipts)
 			if err != nil {

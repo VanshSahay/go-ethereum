@@ -228,7 +228,7 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	// (non-dev chains). The chain's index producer runs the full publication
 	// schedule; without an index only the stateless level-0 root is computed.
 	var tablesToWrite []core.TableWrite
-	if miner.chainConfig.IsAmsterdam(work.header.Number, work.header.Time) && work.evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+	if miner.chainConfig.IsEIP8304(work.header.Number, work.header.Time) && work.evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
 		if ix := miner.chain.LogIndex(); ix != nil {
 			tablesToWrite, err = ix.TableWritesForBlock(work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
 			if err != nil {

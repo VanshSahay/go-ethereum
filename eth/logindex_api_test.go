@@ -52,6 +52,7 @@ func newAPIChain(t *testing.T, blocks int, disableIndex bool) (*core.BlockChain,
 		// a disabled index cannot produce the index system calls the chain
 		// maker would emit for an Amsterdam chain
 		config.AmsterdamTime = new(uint64)
+		config.EIP8304Time = new(uint64)
 	}
 	alloc := core.SystemContractAllocs()
 	alloc[params.IndexContractAddress] = types.Account{Nonce: 1, Code: params.IndexContractCode}

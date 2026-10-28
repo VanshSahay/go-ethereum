@@ -464,6 +464,7 @@ type ChainConfig struct {
 	BPO5Time      *uint64 `json:"bpo5Time,omitempty"`      // BPO5 switch time (nil = no fork, 0 = already on bpo5)
 	AmsterdamTime *uint64 `json:"amsterdamTime,omitempty"` // Amsterdam switch time (nil = no fork, 0 = already on amsterdam)
 	BogotaTime    *uint64 `json:"bogotaTime,omitempty"`    // Bogota switch time (nil = no fork, 0 = already on bogota)
+	EIP8304Time   *uint64 `json:"eip8304Time,omitempty"`   // EIP-8304 (trustless log index) switch time (nil = no fork, 0 = active from genesis)
 	UBTTime       *uint64 `json:"ubtTime,omitempty"`       // UBT switch time (nil = no fork, 0 = already on UBT)
 
 	// TerminalTotalDifficulty is the amount of total difficulty reached by
@@ -601,6 +602,9 @@ func (c *ChainConfig) String() string {
 	if c.AmsterdamTime != nil {
 		result += fmt.Sprintf(", AmsterdamTime: %v", *c.AmsterdamTime)
 	}
+	if c.EIP8304Time != nil {
+		result += fmt.Sprintf(", EIP8304Time: %v", *c.EIP8304Time)
+	}
 	if c.BogotaTime != nil {
 		result += fmt.Sprintf(", BogotaTime: %v", *c.BogotaTime)
 	}
@@ -698,6 +702,9 @@ func (c *ChainConfig) Description() string {
 	}
 	if c.AmsterdamTime != nil {
 		banner += fmt.Sprintf(" - Amsterdam:                   @%-10v\n", *c.AmsterdamTime)
+	}
+	if c.EIP8304Time != nil {
+		banner += fmt.Sprintf(" - EIP-8304 (log index):        @%-10v\n", *c.EIP8304Time)
 	}
 	if c.BogotaTime != nil {
 		banner += fmt.Sprintf(" - Bogota:                      @%-10v\n", *c.BogotaTime)
@@ -879,6 +886,12 @@ func (c *ChainConfig) IsAmsterdam(num *big.Int, time uint64) bool {
 	return c.IsLondon(num) && isTimestampForked(c.AmsterdamTime, time)
 }
 
+// IsEIP8304 returns whether time is either equal to the EIP-8304 activation
+// time or greater.
+func (c *ChainConfig) IsEIP8304(num *big.Int, time uint64) bool {
+	return c.IsLondon(num) && isTimestampForked(c.EIP8304Time, time)
+}
+
 // IsBogota returns whether time is either equal to the Bogota fork time or greater.
 func (c *ChainConfig) IsBogota(num *big.Int, time uint64) bool {
 	return c.IsLondon(num) && isTimestampForked(c.BogotaTime, time)
@@ -1004,6 +1017,14 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		// If it was optional and not set, then ignore it
 		if !cur.optional || (cur.block != nil || cur.timestamp != nil) {
 			lastFork = cur
+		}
+	}
+
+	// EIP-8304 is independent of the named forks but needs the post-merge,
+	// post-Shanghai rules (withdrawals-era block format, system calls).
+	if c.EIP8304Time != nil {
+		if c.ShanghaiTime == nil || *c.EIP8304Time < *c.ShanghaiTime {
+			return fmt.Errorf("unsupported fork ordering: EIP-8304 enabled at timestamp %v before Shanghai", *c.EIP8304Time)
 		}
 	}
 
@@ -1141,6 +1162,9 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, headNumber *big.Int, 
 	}
 	if isForkTimestampIncompatible(c.AmsterdamTime, newcfg.AmsterdamTime, headTimestamp) {
 		return newTimestampCompatError("Amsterdam fork timestamp", c.AmsterdamTime, newcfg.AmsterdamTime)
+	}
+	if isForkTimestampIncompatible(c.EIP8304Time, newcfg.EIP8304Time, headTimestamp) {
+		return newTimestampCompatError("EIP-8304 fork timestamp", c.EIP8304Time, newcfg.EIP8304Time)
 	}
 	if isForkTimestampIncompatible(c.BogotaTime, newcfg.BogotaTime, headTimestamp) {
 		return newTimestampCompatError("Bogota fork timestamp", c.BogotaTime, newcfg.BogotaTime)
@@ -1417,6 +1441,7 @@ type Rules struct {
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague, IsOsaka        bool
 	IsAmsterdam, IsBogota, IsUBT                            bool
+	IsEIP8304                                               bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -1443,6 +1468,7 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsOsaka:          isMerge && c.IsOsaka(num, timestamp),
 		IsAmsterdam:      isMerge && c.IsAmsterdam(num, timestamp),
 		IsBogota:         isMerge && c.IsBogota(num, timestamp),
+		IsEIP8304:        isMerge && c.IsEIP8304(num, timestamp),
 		IsUBT:            isUBT,
 		IsEIP4762:        isUBT,
 	}

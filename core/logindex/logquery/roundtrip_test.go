@@ -65,6 +65,7 @@ func newRTChainWith(t testing.TB, blocks int, code []byte, txsPerBlock func(bloc
 	t.Helper()
 	config := *params.MergedTestChainConfig
 	config.AmsterdamTime = new(uint64)
+	config.EIP8304Time = new(uint64)
 	alloc := core.SystemContractAllocs()
 	alloc[params.IndexContractAddress] = types.Account{
 		Nonce:   1,

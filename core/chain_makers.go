@@ -331,7 +331,7 @@ func (b *BlockGen) collectRequests(readonly bool) (requests [][]byte, bal *bal.C
 	// publication schedule, so the generated blocks' system calls match a
 	// re-import of the same chain byte for byte.
 	var tablesToWrite []TableWrite
-	if b.cm.config.IsAmsterdam(b.header.Number, b.header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
+	if b.cm.config.IsEIP8304(b.header.Number, b.header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
 		var err error
 		tablesToWrite, err = b.cm.logIndex.TableWritesForBlock(b.header.Number.Uint64(), b.header.ParentHash, b.receipts)
 		if err != nil {
@@ -426,7 +426,7 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		}
 		// EIP-8304: the fork-activation deployment of the index contract for
 		// chains whose genesis does not pre-deploy it
-		if cm.config.IsAmsterdam(b.header.Number, b.header.Time) {
+		if cm.config.IsEIP8304(b.header.Number, b.header.Time) {
 			blockContext := NewEVMBlockContext(b.header, cm, &b.header.Coinbase)
 			blockContext.Random = &common.Hash{} // enable post-merge instruction set
 			evm := vm.NewEVM(blockContext, statedb, cm.config, vm.Config{})

@@ -282,6 +282,7 @@ func (e *GenesisMismatchError) Error() string {
 type ChainOverrides struct {
 	OverrideOsaka     *uint64
 	OverrideAmsterdam *uint64
+	OverrideEIP8304   *uint64
 	OverrideBPO1      *uint64
 	OverrideBPO2      *uint64
 	OverrideUBT       *uint64
@@ -297,6 +298,9 @@ func (o *ChainOverrides) apply(cfg *params.ChainConfig) error {
 	}
 	if o.OverrideAmsterdam != nil {
 		cfg.AmsterdamTime = o.OverrideAmsterdam
+	}
+	if o.OverrideEIP8304 != nil {
+		cfg.EIP8304Time = o.OverrideEIP8304
 	}
 	if o.OverrideBPO1 != nil {
 		cfg.BPO1Time = o.OverrideBPO1

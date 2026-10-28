@@ -286,6 +286,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if config.OverrideAmsterdam != nil {
 		overrides.OverrideAmsterdam = config.OverrideAmsterdam
 	}
+	if config.OverrideEIP8304 != nil {
+		overrides.OverrideEIP8304 = config.OverrideEIP8304
+	}
 	if config.OverrideBPO1 != nil {
 		overrides.OverrideBPO1 = config.OverrideBPO1
 	}

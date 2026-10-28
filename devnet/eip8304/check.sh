@@ -15,7 +15,7 @@ OUT="$(mktemp -d)"
 CONTRACT=0x0000000000000000000000000000000000008304
 TRANSFER=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
 # the index contract is deployed by the fork-activation system call at the
-# first Amsterdam block, so every block from 1 on is indexed
+# first EIP-8304 block (--override.eip8304=0), so every block from 1 on is indexed
 DEPLOY=1
 if [ -f "$DIR/deployed_block" ]; then
   DEPLOY=$(cat "$DIR/deployed_block")

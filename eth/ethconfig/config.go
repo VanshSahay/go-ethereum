@@ -212,6 +212,9 @@ type Config struct {
 	// OverrideAmsterdam (TODO: remove after the fork)
 	OverrideAmsterdam *uint64 `toml:",omitempty"`
 
+	// OverrideEIP8304 sets the EIP-8304 (trustless log index) activation time
+	OverrideEIP8304 *uint64 `toml:",omitempty"`
+
 	// OverrideBPO1 (TODO: remove after the fork)
 	OverrideBPO1 *uint64 `toml:",omitempty"`
 
