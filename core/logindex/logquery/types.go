@@ -51,6 +51,10 @@ type tableQueryProof struct {
 	ProofHashes   []common.Hash      `json:"proofHashes"`
 	ResultCount   uint64             `json:"resultCount"`
 	BlockResults  []blockResults     `json:"blockResults"`
+	// Pin marks a table that is not part of the coverage of the proven range
+	// and only supplies the block entry that pins the last proven block when
+	// that block is the last one of its coverage table.
+	Pin bool `json:"pin,omitempty"`
 }
 
 // blockResults carries a proven block header, the transaction indexes whose

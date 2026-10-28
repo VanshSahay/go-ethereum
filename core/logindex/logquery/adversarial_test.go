@@ -41,13 +41,19 @@ type advFixture struct {
 
 func newAdvFixture(t *testing.T) *advFixture {
 	t.Helper()
+	return newAdvFixtureTo(t, 39)
+}
+
+// newAdvFixtureTo makes a fixture whose query ends at the given block.
+func newAdvFixtureTo(t *testing.T, lastBlock uint64) *advFixture {
+	t.Helper()
 	rtc := newRTChain(t, 40)
 	emitter := crypto.CreateAddress(rtSender, 1)
 	pattern, err := NewLegacyMatcher([]common.Address{emitter}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: 39, Limit: rtMaxUint64}
+	req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: lastBlock, Limit: rtMaxUint64}
 	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
 	if err != nil {
 		t.Fatal(err)
@@ -420,5 +426,84 @@ func TestAdversarialRange(t *testing.T) {
 		if _, err := fl.proof(t).Verify(fl.trusted, other, fl.opts); err == nil {
 			t.Errorf("%s: proof for limit 8 verified for limit 9", name)
 		}
+	}
+}
+
+// TestAdversarialPins pins the header pinning: a result block's header must be
+// committed by a block entry of a verified table, wherever that entry lives.
+func TestAdversarialPins(t *testing.T) {
+	// block 3 is the last block of its coverage table, so its hash can only be
+	// pinned by the entry in the pin table that follows
+	f := newAdvFixtureTo(t, 3)
+	p := f.proof(t)
+	pinAt := -1
+	for i := range p.TableQueryProofs {
+		if p.TableQueryProofs[i].Pin {
+			pinAt = i
+		}
+	}
+	if pinAt < 0 {
+		t.Fatal("fixture proof has no pin table")
+	}
+	if _, err := f.proof(t).Verify(f.trusted, f.req, f.opts); err != nil {
+		t.Fatalf("honest proof with a pin table: %v", err)
+	}
+
+	f.mustReject(t, "drop the pin table", func(p *QueryProof) {
+		p.TableQueryProofs = p.TableQueryProofs[:pinAt]
+	})
+	f.mustReject(t, "forge the pinned header", func(p *QueryProof) {
+		// a header of the attacker's choosing for the last block, its hash is
+		// not the one the pin table commits to
+		tqp := &p.TableQueryProofs[pinAt-1]
+		br := &tqp.BlockResults[len(tqp.BlockResults)-1]
+		br.Header.Extra = []byte("forged")
+	})
+	f.mustReject(t, "pin table before the coverage", func(p *QueryProof) {
+		p.TableQueryProofs[0], p.TableQueryProofs[pinAt] = p.TableQueryProofs[pinAt], p.TableQueryProofs[0]
+	})
+	f.mustReject(t, "pin table with results", func(p *QueryProof) {
+		p.TableQueryProofs[pinAt].ResultCount = 1
+	})
+	f.mustReject(t, "coverage table marked as a pin", func(p *QueryProof) {
+		p.TableQueryProofs[0].Pin = true
+	})
+	f.mustReject(t, "pin table counted as coverage", func(p *QueryProof) {
+		p.TableQueryProofs[pinAt].Pin = false
+	})
+	f.mustReject(t, "pin entry of another block", func(p *QueryProof) {
+		// swap in a different published table as the pin: its entries do not
+		// hold the block the results need pinned
+		tqp := &p.TableQueryProofs[pinAt]
+		tqp.FirstBlock, tqp.TableSize = tqp.FirstBlock+tqp.TableSize, 4
+	})
+}
+
+// TestProofSizeIndependentOfHeadDistance pins that the proof covers the query
+// range only: a query far from the reference head needs no tables up to it.
+func TestProofSizeIndependentOfHeadDistance(t *testing.T) {
+	near := newAdvFixtureTo(t, 39)
+	far := newAdvFixtureTo(t, 25)
+	count := func(f *advFixture) (coverage, pins int) {
+		for _, tqp := range f.proof(t).TableQueryProofs {
+			if tqp.Pin {
+				pins++
+			} else {
+				coverage++
+			}
+		}
+		return
+	}
+	for name, f := range map[string]*advFixture{"near": near, "far": far} {
+		coverage, pins := count(f)
+		if pins > 1 {
+			t.Errorf("%s: %d pin tables, want at most one", name, pins)
+		}
+		for _, tqp := range f.proof(t).TableQueryProofs {
+			if !tqp.Pin && tqp.FirstBlock > f.req.LastBlock {
+				t.Errorf("%s: coverage table [%d..] lies beyond the query end %d", name, tqp.FirstBlock, f.req.LastBlock)
+			}
+		}
+		t.Logf("%s: %d coverage tables, %d pin tables", name, coverage, pins)
 	}
 }

@@ -106,9 +106,11 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 	if len(p.IndexContracts) > len(p.TableQueryProofs) {
 		return nil, errors.New("unused index contracts in proof")
 	}
-	// the tables must be valid, adjacent and cover the proven range; the
-	// parameters are validated before any arithmetic is done on them
+	// the coverage tables must be valid, adjacent and cover the proven range;
+	// they are followed by pin tables that only supply block entries. The
+	// parameters are validated before any arithmetic is done on them.
 	paths := make([]tablePath, len(p.TableQueryProofs))
+	coverage := 0
 	for i := range p.TableQueryProofs {
 		tqp := &p.TableQueryProofs[i]
 		path, err := checkTable(tqp.TableSize, tqp.FirstBlock, refNumber)
@@ -116,25 +118,37 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 			return nil, err
 		}
 		paths[i] = path
+		if tqp.Pin {
+			if tqp.ResultCount != 0 || len(tqp.BlockResults) != 0 {
+				return nil, errors.New("results in a pin table")
+			}
+			continue
+		}
+		if coverage != i {
+			return nil, errors.New("coverage table after a pin table")
+		}
 		if i > 0 {
 			prev := &p.TableQueryProofs[i-1]
 			if prev.FirstBlock+prev.TableSize != tqp.FirstBlock {
 				return nil, errors.New("table proofs are not adjacent")
 			}
 		}
+		coverage++
 	}
-	first := p.TableQueryProofs[0].FirstBlock
-	lastTqp := &p.TableQueryProofs[len(p.TableQueryProofs)-1]
-	last := lastTqp.FirstBlock + lastTqp.TableSize - 1
-	if p.Query.FirstBlock < first || p.Query.LastBlock > last {
-		return nil, errors.New("table proofs do not cover the query range")
+	if coverage == 0 {
+		return nil, errors.New("no table proofs")
 	}
-	if first0 := &p.TableQueryProofs[0]; p.Query.FirstBlock > first0.FirstBlock+first0.TableSize-1 {
-		return nil, errors.New("the first table proof lies before the query range")
+	firstTqp, lastTqp := &p.TableQueryProofs[0], &p.TableQueryProofs[coverage-1]
+	// every coverage table must overlap the proven range and together they
+	// must contain all of it
+	if p.Query.FirstBlock < firstTqp.FirstBlock || p.Query.FirstBlock > firstTqp.FirstBlock+firstTqp.TableSize-1 {
+		return nil, errors.New("the first table proof does not contain the start of the query range")
+	}
+	if p.Query.LastBlock > lastTqp.FirstBlock+lastTqp.TableSize-1 || p.Query.LastBlock < lastTqp.FirstBlock {
+		return nil, errors.New("the last table proof does not contain the end of the query range")
 	}
 	var (
 		allLogs      []*types.Log
-		sawAnchor    bool
 		blockEntryOf = make(map[uint64]common.Hash) // block number -> proven block hash
 		nodes        = toNodeMap(p.ContractProofNodes)
 		codes        = toNodeMap(p.ContractProofCodes)
@@ -181,14 +195,14 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 		if tableRoot != contractRoot {
 			return nil, errors.New("table root mismatch")
 		}
-		tr, err := tqp.verify(&p.Query, p.Query.FirstBlock, p.Query.LastBlock)
+		var tr *tableResult
+		if tqp.Pin {
+			tr, err = tqp.verifyPin()
+		} else {
+			tr, err = tqp.verify(&p.Query, p.Query.FirstBlock, p.Query.LastBlock)
+		}
 		if err != nil {
 			return nil, err
-		}
-		if tr.anchor {
-			sawAnchor = true
-		} else if sawAnchor {
-			return nil, errors.New("table proof inside the range follows an anchor table")
 		}
 		allLogs = append(allLogs, tr.logs...)
 		for number, hash := range tr.blocks {
@@ -198,14 +212,10 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 			blockEntryOf[number] = hash
 		}
 	}
-	// the proven chain must reach the reference head: the last table proves
-	// the head's parent block entry, whose content and block number must
-	// match the reference header exactly
-	if blockEntryOf[refNumber-1] != p.RefHeader.ParentHash {
-		return nil, errors.New("proven chain does not reach the reference head")
-	}
-	// every block result's header must be pinned by a proven block entry; the
-	// head itself is pinned by the reference header
+	// every block result's header must be pinned by a proven block entry: the
+	// roots of all tables are read from the trusted state, so their block
+	// entries are canonical. The reference block itself is pinned by the
+	// trusted header.
 	for ti := range p.TableQueryProofs {
 		tqp := &p.TableQueryProofs[ti]
 		for i := range tqp.BlockResults {
@@ -319,15 +329,13 @@ type txMeta struct {
 type tableResult struct {
 	logs   []*types.Log           // matching logs in position order
 	blocks map[uint64]common.Hash // proven block entries by block number
-	anchor bool                   // the table is outside the proven range and only anchors headers
 }
 
-// verify checks one table's proof against the query over the proven range and
-// returns its matching logs and block entries. The entry checks are local to
-// the table; the cross-table checks are done by the caller.
-func (tqp *tableQueryProof) verify(query *FilterQuery, rangeFirst, rangeLast uint64) (*tableResult, error) {
+// checkEntries validates the proven entries of a table proof against the table
+// parameters and returns the block entries and transaction entries among them.
+func (tqp *tableQueryProof) checkEntries() (map[uint64]common.Hash, map[txKey]txMeta, error) {
 	if len(tqp.ProvenEntries) != len(tqp.EntryIndices) {
-		return nil, errors.New("entry count and entry index count mismatch")
+		return nil, nil, errors.New("entry count and entry index count mismatch")
 	}
 	var (
 		provenBlocks = make(map[uint64]common.Hash)
@@ -336,61 +344,78 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, rangeFirst, rangeLast uin
 	)
 	for i, entryIndex := range tqp.EntryIndices {
 		if i > 0 && entryIndex <= tqp.EntryIndices[i-1] {
-			return nil, errors.New("entry indices are not strictly ascending")
+			return nil, nil, errors.New("entry indices are not strictly ascending")
 		}
 		if entryIndex >= tqp.EntryCount {
-			return nil, errors.New("entry index out of range")
+			return nil, nil, errors.New("entry index out of range")
 		}
 		if i > 0 && types.CompareEntries(tqp.ProvenEntries[i-1], tqp.ProvenEntries[i]) >= 0 {
-			return nil, errors.New("proven entries are not strictly ascending")
+			return nil, nil, errors.New("proven entries are not strictly ascending")
 		}
 		typ, content, blockNum, txIdx, logIdx, err := types.EntryFields(tqp.ProvenEntries[i])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// a table holds the block entries of the blocks before its own blocks
 		// (the entry of block n lives in the table that contains block n+1) and
 		// the transaction and log entries of its own blocks
 		if blockNum == math.MaxUint64 {
-			return nil, errors.New("entry block number out of range")
+			return nil, nil, errors.New("entry block number out of range")
 		}
 		switch typ {
 		case types.EntryTypeBlock:
 			if blockNum+1 < tqp.FirstBlock || blockNum+1 > last {
-				return nil, errors.New("block entry outside the table range")
+				return nil, nil, errors.New("block entry outside the table range")
 			}
 			if _, dup := provenBlocks[blockNum]; dup {
-				return nil, errors.New("duplicate block entry")
+				return nil, nil, errors.New("duplicate block entry")
 			}
 			provenBlocks[blockNum] = common.Hash(content)
 		case types.EntryTypeTransaction:
 			if blockNum < tqp.FirstBlock || blockNum > last {
-				return nil, errors.New("transaction entry outside the table range")
+				return nil, nil, errors.New("transaction entry outside the table range")
 			}
 			key := txKey{blockNum, txIdx}
 			if _, dup := provenTxs[key]; dup {
-				return nil, errors.New("duplicate transaction entry")
+				return nil, nil, errors.New("duplicate transaction entry")
 			}
 			// the transaction entry's log index field carries the cumulative
 			// log count of the block before the transaction
 			provenTxs[key] = txMeta{hash: common.Hash(content), logOffset: logIdx}
 		default:
 			if blockNum < tqp.FirstBlock || blockNum > last {
-				return nil, errors.New("log entry outside the table range")
+				return nil, nil, errors.New("log entry outside the table range")
 			}
 		}
 	}
+	return provenBlocks, provenTxs, nil
+}
+
+// verifyPin checks a pin table, which supplies block entries only.
+func (tqp *tableQueryProof) verifyPin() (*tableResult, error) {
+	blocks, _, err := tqp.checkEntries()
+	if err != nil {
+		return nil, err
+	}
+	return &tableResult{blocks: blocks}, nil
+}
+
+// verify checks one table's proof against the query over the proven range and
+// returns its matching logs and block entries. The entry checks are local to
+// the table; the cross-table checks are done by the caller.
+func (tqp *tableQueryProof) verify(query *FilterQuery, rangeFirst, rangeLast uint64) (*tableResult, error) {
+	provenBlocks, provenTxs, err := tqp.checkEntries()
+	if err != nil {
+		return nil, err
+	}
+	last := tqp.FirstBlock + tqp.TableSize - 1
 	res := &tableResult{blocks: provenBlocks}
 
 	// the part of the table inside the proven range; a table outside of it
 	// only anchors block headers and proves no results
 	scanFirst, scanLast := max(tqp.FirstBlock, rangeFirst), min(last, rangeLast)
 	if scanFirst > scanLast {
-		if len(tqp.BlockResults) != 0 || tqp.ResultCount != 0 {
-			return nil, errors.New("results in a table outside the proven range")
-		}
-		res.anchor = true
-		return res, nil
+		return nil, errors.New("coverage table outside the proven range")
 	}
 
 	// decode the proven receipts: each needs a proven transaction entry, which

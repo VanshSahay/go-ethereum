@@ -69,10 +69,8 @@ func (tp *tableProver) addBlockProofs(newProofs map[uint64]*blockProof, newResul
 
 // finalize assembles the table query proof: the entry indexes of the parent
 // block entry, the block entries of every proven block and the transaction
-// entries of every proven transaction, each with its multiproof section. The
-// last table of the proof also proves the head's parent block entry, chaining
-// the proven tables to the reference header.
-func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.Header) (tableQueryProof, error) {
+// entries of every proven transaction, each with its multiproof section.
+func (tp *tableProver) finalize(proveParentBlock common.Hash) (tableQueryProof, error) {
 	blockNumbers := make([]uint64, 0, len(tp.blockProofs))
 	for number := range tp.blockProofs {
 		blockNumbers = append(blockNumbers, number)
@@ -108,20 +106,6 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.H
 		for _, mtx := range bp.matchingTxs {
 			proof.EntryIndices = append(proof.EntryIndices, mtx.txEntryIndex)
 		}
-	}
-	if refHeader != nil {
-		// the block entry of the head's parent chains the last table to the
-		// reference header: its content is the head's parent hash and its
-		// block number field is head-1, matching the reference header exactly
-		anchorEntry := types.EncodeEntry(types.EntryTypeBlock, refHeader.ParentHash[:], refHeader.Number.Uint64()-1, 0, 0)
-		entryIndex, found, seekErr := tp.reader.SeekEntry(anchorEntry)
-		if seekErr != nil {
-			return tableQueryProof{}, seekErr
-		}
-		if !found {
-			return tableQueryProof{}, errors.New("head anchor block entry not found")
-		}
-		proof.EntryIndices = append(proof.EntryIndices, entryIndex)
 	}
 	sort.Slice(proof.EntryIndices, func(i, j int) bool {
 		return proof.EntryIndices[i] < proof.EntryIndices[j]
@@ -172,6 +156,34 @@ func (tqp *tableQueryProof) lastProvenBlock() common.Hash {
 		return last.Header.Hash()
 	}
 	return common.Hash{}
+}
+
+// finalizePin assembles a pin table proof: a single block entry, the one that
+// pins the hash of a block which is the last one of its coverage table.
+func (tp *tableProver) finalizePin(number uint64, hash common.Hash) (tableQueryProof, error) {
+	entry := types.EncodeEntry(types.EntryTypeBlock, hash[:], number, 0, 0)
+	entryIndex, found, err := tp.reader.SeekEntry(entry)
+	if err != nil {
+		return tableQueryProof{}, err
+	}
+	if !found {
+		return tableQueryProof{}, errors.New("pin block entry not found")
+	}
+	proof := tableQueryProof{
+		FirstBlock:    tp.reader.BlockRange().First(),
+		TableSize:     tp.reader.BlockRange().Count(),
+		EntryCount:    tp.reader.EntryCount,
+		EntryIndices:  []uint64{entryIndex},
+		ProvenEntries: []types.IndexEntry{entry},
+		Pin:           true,
+	}
+	if proof.ProofHashes, err = tp.makeProofHashes(nil, math.MaxUint64, entryIndex); err != nil {
+		return tableQueryProof{}, err
+	}
+	if proof.ProofHashes, err = tp.makeProofHashes(proof.ProofHashes, entryIndex, math.MaxUint64); err != nil {
+		return tableQueryProof{}, err
+	}
+	return proof, nil
 }
 
 // makeProofHashes appends the non-leaf tree node hashes between proven entry
@@ -350,36 +362,52 @@ func appendUint64(dst []byte, v uint64) []byte {
 	return rlp.AppendUint64(dst, v)
 }
 
-// makeQueryProof assembles the query proof from the per-table provers:
-// adjacent tables are chained through their parent block entries and each
-// table root is proven against the reference header's state. The last prover
-// also proves the head's parent block entry, chaining the tables to the
-// reference header.
-func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver) (*QueryProof, error) {
+// pinRequest asks for a pin table: the block entry of the given block lives in
+// the table containing the following block.
+type pinRequest struct {
+	prover *tableProver
+	number uint64
+	hash   common.Hash
+}
+
+// makeQueryProof assembles the query proof from the per-table provers: the
+// coverage tables chained through their parent block entries, followed by the
+// optional pin table, with each table root proven against the reference
+// header's state.
+func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver, pin *pinRequest) (*QueryProof, error) {
 	proof := &QueryProof{
 		Query:            *query,
 		RefHeader:        *refHeader,
-		TableQueryProofs: make([]tableQueryProof, len(provers)),
+		TableQueryProofs: make([]tableQueryProof, 0, len(provers)+1),
 	}
 	proof.Query.FirstBlock, proof.Query.LastBlock = firstBlock, lastBlock
 	proofNodes := make(trieProofWriter)
 	proofCodes := make(trieProofWriter)
 	var proveParentBlock common.Hash
-	for i, prover := range provers {
-		if i != 0 && prover.reader.BlockRange().First() != provers[i-1].reader.BlockRange().AfterLast() {
+	all := provers
+	if pin != nil {
+		all = append(slices.Clone(provers), pin.prover)
+	}
+	for i, prover := range all {
+		isPin := pin != nil && i == len(all)-1
+		if !isPin && i != 0 && prover.reader.BlockRange().First() != all[i-1].reader.BlockRange().AfterLast() {
 			return nil, errors.New("prover block ranges are not continuous")
 		}
-		var lastRef *types.Header
-		if i == len(provers)-1 {
-			lastRef = refHeader
+		var (
+			tproof tableQueryProof
+			err    error
+		)
+		if isPin {
+			tproof, err = prover.finalizePin(pin.number, pin.hash)
+		} else {
+			tproof, err = prover.finalize(proveParentBlock)
+			proveParentBlock = tproof.lastProvenBlock()
 		}
-		tproof, err := prover.finalize(proveParentBlock, lastRef)
 		if err != nil {
 			return nil, err
 		}
-		proveParentBlock = tproof.lastProvenBlock()
 		tproof.IndexContract = proof.addOrGetIndexContract(prover.reader.IndexContract)
-		proof.TableQueryProofs[i] = tproof
+		proof.TableQueryProofs = append(proof.TableQueryProofs, tproof)
 		// generate the state proof nodes of the table root: tables published
 		// in the reference block itself are read from the raw storage slot (get()
 		// still reverts there), older ones by executing get() on the proven state

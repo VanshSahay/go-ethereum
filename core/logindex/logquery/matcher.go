@@ -129,19 +129,11 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		return nil, common.Range[uint64]{}, nil, errors.New("empty block range")
 	}
 	blockRange := common.NewRange[uint64](firstBlock, lastBlock+1-firstBlock)
-	readerRange := blockRange
-	if prove && lastBlock < headBlock {
-		// extend the proven range to the reference head: every result block is
-		// pinned by block entries chaining up to the head's parent entry, so
-		// the tables covering the head must be part of the proof even when
-		// nothing matches there
-		readerRange.SetLast(headBlock)
-	}
 	var publishedBefore uint64
 	if prove {
 		publishedBefore = refHeader.Number.Uint64()
 	}
-	readers := mc.logIndex.GetRangeReaders(refBlockHash, readerRange, publishedBefore)
+	readers := mc.logIndex.GetRangeReaders(refBlockHash, blockRange, publishedBefore)
 	if len(readers) == 0 {
 		return nil, common.Range[uint64]{}, nil, errors.New("required block range is not indexed")
 	}
@@ -159,13 +151,10 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		maxResults = int(query.Limit)
 	}
 	var (
-		allLogs []*types.Log // in scan order
-		provers []*tableProver
-		// the tables outside the scanned part carry no results but must be part
-		// of the proof: they chain the covered block entries up to the head
-		tailProvers []*tableProver
-		limited     bool   // the result limit was reached
-		cutBlock    uint64 // the block the limit was reached in
+		allLogs  []*types.Log // in scan order
+		provers  []*tableProver
+		limited  bool   // the result limit was reached
+		cutBlock uint64 // the block the limit was reached in
 	)
 	for _, tr := range readers {
 		var prover *tableProver
@@ -173,19 +162,8 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 			prover = newTableProver(tr)
 		}
 		br := tr.BlockRange().Intersection(blockRange)
-		if br.IsEmpty() {
-			if prove {
-				tailProvers = append(tailProvers, prover)
-			}
-			continue
-		}
-		if limited {
-			// past the cut: older tables are not needed at all, newer ones
-			// only anchor the proof to the reference head
-			if prove && !query.LimitLatest {
-				tailProvers = append(tailProvers, prover)
-			}
-			continue
+		if br.IsEmpty() || limited {
+			continue // beyond the cut: not part of the proven range
 		}
 		mp := &matcherProcess{
 			chainView:   chainView,
@@ -236,17 +214,36 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 	}
 	var proof *QueryProof
 	if prove {
-		// the tail tables follow the scanned ones in ascending range order
-		sort.Slice(tailProvers, func(i, j int) bool {
-			return tailProvers[i].reader.BlockRange().First() < tailProvers[j].reader.BlockRange().First()
-		})
-		provers = append(provers, tailProvers...)
-		var err error
-		if proof, err = makeQueryProof(refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, provers); err != nil {
+		pin, err := mc.pinRequest(refHeader, provers)
+		if err != nil {
+			return nil, common.Range[uint64]{}, nil, err
+		}
+		if proof, err = makeQueryProof(refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, provers, pin); err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
 	}
 	return allLogs, common.NewRange[uint64](provenFirst, provenLast+1-provenFirst), proof, nil
+}
+
+// pinRequest tells whether the block hash of the last proven result needs a
+// pin table. The block entry of block n is stored in the table that contains
+// block n+1, so a result in the last block of the last coverage table can only
+// be pinned by another table, unless it is the reference block itself.
+func (mc *Matcher) pinRequest(refHeader *types.Header, provers []*tableProver) (*pinRequest, error) {
+	if len(provers) == 0 {
+		return nil, nil
+	}
+	last := provers[len(provers)-1]
+	number := last.reader.BlockRange().Last()
+	bp, ok := last.blockProofs[number]
+	if !ok || number >= refHeader.Number.Uint64() {
+		return nil, nil
+	}
+	readers := mc.logIndex.GetRangeReaders(refHeader.Hash(), common.NewRange[uint64](number+1, 1), refHeader.Number.Uint64())
+	if len(readers) != 1 {
+		return nil, errors.New("no published table contains the block after the last result block")
+	}
+	return &pinRequest{prover: newTableProver(readers[0]), number: number, hash: bp.header.Hash()}, nil
 }
 
 // checkCoverage verifies that the readers, sorted in scan order, form one
