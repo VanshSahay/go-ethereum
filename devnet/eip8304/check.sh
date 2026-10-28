@@ -5,6 +5,17 @@
 #
 # Usage: check.sh <rpc-url> [<second-participant-rpc-url>]
 #
+# Environment knobs (all optional):
+#   TARGET       head to wait for before checking (default: first indexed block
+#                + 360). 1100 or more makes the retained-levels step run past
+#                the level-0 window, 4200 or more past level 1.
+#   PAGE_LIMIT   limit of every forward page, so short chains still exercise
+#                cursor paging.
+#   RESTART_CMD  command that restarts the node under test (default: docker
+#                restart of the el-1-geth container). With a geth --dev node,
+#                see dev/run.sh.
+#   PROXY_PORT   listen port of the adversarial proxy (default 28545).
+#
 # With a second participant (the devnet runs one with --logindex.disable) the
 # script also checks that both nodes follow the same chain: the table roots are
 # derived from the chain history, so a node without an index must not diverge.
@@ -28,6 +39,10 @@ if [ -f "$DIR/deployed_block" ]; then
   DEPLOY=$(cat "$DIR/deployed_block")
 fi
 
+# build the verifier once instead of re-linking it through go run per proof
+VERIFY_BIN="$OUT/verify"
+( cd "$REPO" && go build -o "$VERIFY_BIN" ./devnet/eip8304/cmd/verify )
+
 head_number() {
   cast block-number --rpc-url "$RPC"
 }
@@ -43,7 +58,7 @@ verify_proof() {
   ref_number=$(jq -r '.refHeader.number' "$proof")
   ref_hash=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
   printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":%s,"limitLatest":%s%s}' "$topic" "${VFROM:-$FROM}" "${VTO:-$TO}" "${VLIMIT:-10000}" "${VLATEST:-false}" "${VCURSOR:-}" > "$OUT/query.json"
-  ( cd "$REPO" && go run ./devnet/eip8304/cmd/verify -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@" )
+  "$VERIFY_BIN" -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@"
 }
 
 if [ -n "${2:-}" ]; then
@@ -60,7 +75,7 @@ if [ -n "${2:-}" ]; then
 fi
 
 echo "== waiting for the index to accumulate blocks =="
-TARGET=$((DEPLOY + 360))
+TARGET=${TARGET:-$((DEPLOY + 360))}
 while true; do
   HEAD=$(head_number)
   if [ "$HEAD" -ge "$TARGET" ]; then break; fi
@@ -104,19 +119,21 @@ cast rpc --rpc-url "$RPC" eth_getLogs "$GETLOGS_PARAMS" > "$OUT/getlogs.json"
 N_GETLOGS=$(jq 'length' "$OUT/getlogs.json")
 # page through the range: a page that reaches the limit carries a nextCursor
 # (its last log), and the next page starts at that block after the cursor
+PAGE_LIMIT_PARAM=""
+[ -n "${PAGE_LIMIT:-}" ] && PAGE_LIMIT_PARAM=$(printf ',"limit":"0x%x"' "$PAGE_LIMIT")
 START=$FROM
 CURSOR=""
 VCURSOR_NEXT=""
 PAGE=0
 echo "[]" > "$OUT/pages.json"
 while [ "$START" -le "$TO" ]; do
-  PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"%s}' "$TRANSFER" "$START" "$TO" "$CURSOR")
+  PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"%s%s}' "$TRANSFER" "$START" "$TO" "$PAGE_LIMIT_PARAM" "$CURSOR")
   cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$PARAMS" > "$OUT/page$PAGE.json"
   PAGE_LAST=$(( $(jq -r '.lastBlock' "$OUT/page$PAGE.json") ))
   echo "  page $PAGE: blocks $START..$PAGE_LAST, $(jq '.logs | length' "$OUT/page$PAGE.json") logs"
   jq -s '.[0] + .[1].logs' "$OUT/pages.json" "$OUT/page$PAGE.json" > "$OUT/pages.tmp" && mv "$OUT/pages.tmp" "$OUT/pages.json"
   jq '.proof' "$OUT/page$PAGE.json" > "$OUT/proof$PAGE.json"
-  VFROM=$START VCURSOR=$VCURSOR_NEXT verify_proof "$OUT/proof$PAGE.json" "$TRANSFER" > "$OUT/verify$PAGE.log" 2>&1 || { cat "$OUT/verify$PAGE.log" >&2; echo "page $PAGE failed verification" >&2; exit 1; }
+  VFROM=$START VLIMIT=${PAGE_LIMIT:-10000} VCURSOR=$VCURSOR_NEXT verify_proof "$OUT/proof$PAGE.json" "$TRANSFER" > "$OUT/verify$PAGE.log" 2>&1 || { cat "$OUT/verify$PAGE.log" >&2; echo "page $PAGE failed verification" >&2; exit 1; }
   if [ "$(jq -r '.nextCursor // empty' "$OUT/page$PAGE.json")" != "" ]; then
     CUR_BLOCK=$(( $(jq -r '.nextCursor.block' "$OUT/page$PAGE.json") ))
     CUR_INDEX=$(( $(jq -r '.nextCursor.logIndex' "$OUT/page$PAGE.json") ))
@@ -149,13 +166,14 @@ echo "parity: all $N_PURETH logs identical"
 echo
 echo "== independent proof verification =="
 jq '.proof' "$OUT/result.json" > "$OUT/proof.json"
-verify_proof "$OUT/proof.json" "$TRANSFER"
+# result.json is the first page: it answers the paged request, limit included
+VLIMIT=${PAGE_LIMIT:-10000} verify_proof "$OUT/proof.json" "$TRANSFER"
 
 echo
 echo "== tamper demos (each modified proof must be rejected) =="
 for IDX in 0 40 90; do
   echo "--- tamper index $IDX"
-  if verify_proof "$OUT/proof.json" "$TRANSFER" tamper "$IDX"; then
+  if VLIMIT=${PAGE_LIMIT:-10000} verify_proof "$OUT/proof.json" "$TRANSFER" tamper "$IDX"; then
     echo "TAMPER DEMO FAILED: tampered proof verified" >&2
     exit 1
   fi
@@ -241,13 +259,17 @@ echo
 echo "== restart resilience (file-backed indexer reload) =="
 cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$PURETH_PARAMS" > "$OUT/result1.json"
 N_BEFORE=$(jq '.logs | length' "$OUT/result1.json")
-EL_CONTAINER=$(docker ps --format '{{.Names}}' | grep 'el-1-geth' | head -1)
-# the harness stops containers after one second, too short for a clean state
-# journal: give the node time to shut down
-docker restart -t 60 "$EL_CONTAINER" > /dev/null
-# docker maps the published port again on restart: follow the container
-NEW_RPC=$(docker port "$EL_CONTAINER" 8545/tcp | head -1 | sed 's/^0\.0\.0\.0/127.0.0.1/')
-RPC=${NEW_RPC:-$RPC}
+if [ -n "${RESTART_CMD:-}" ]; then
+  bash -c "$RESTART_CMD"
+else
+  EL_CONTAINER=$(docker ps --format '{{.Names}}' | grep 'el-1-geth' | head -1)
+  # the harness stops containers after one second, too short for a clean state
+  # journal: give the node time to shut down
+  docker restart -t 60 "$EL_CONTAINER" > /dev/null
+  # docker maps the published port again on restart: follow the container
+  NEW_RPC=$(docker port "$EL_CONTAINER" 8545/tcp | head -1 | sed 's/^0\.0\.0\.0/127.0.0.1/')
+  RPC=${NEW_RPC:-$RPC}
+fi
 while ! cast block-number --rpc-url "$RPC" > /dev/null 2>&1; do
   sleep 3
 done
