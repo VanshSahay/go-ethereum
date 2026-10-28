@@ -364,14 +364,23 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, 
 	for _, receipt := range receipts {
 		allLogs = append(allLogs, receipt.Logs...)
 	}
-	// EIP-8304: the level-0 index table root commits to the parent block
-	// hash, which the transition tool environment does not carry; computing
-	// it needs an env schema extension, so t8n cannot run blocks on which the
-	// fork is active: failing is better than committing a wrong state root.
+	// EIP-8304: the level-0 index table root commits to the parent block hash,
+	// taken from the environment's block hashes. Higher-level tables are
+	// derived from the history of earlier blocks, which the environment does
+	// not carry: a block on which one falls due fails instead of getting a
+	// wrong state root.
+	var tablesToWrite []core.TableWrite
 	if chainConfig.IsEIP8304(vmContext.BlockNumber, vmContext.Time) {
-		return nil, nil, nil, NewError(ErrorEVM, errors.New("EIP-8304 index table roots are not supported by the transition tool"))
+		parentHash, ok := pre.Env.BlockHashes[math.HexOrDecimal64(pre.Env.Number-1)]
+		if !ok || pre.Env.Number == 0 {
+			return nil, nil, nil, NewError(ErrorEVM, errors.New("EIP-8304 needs the parent block hash in the environment's blockHashes"))
+		}
+		var err error
+		if tablesToWrite, err = core.DeriveLogIndexWrites(nil, chainConfig, pre.Env.Number, parentHash, receipts); err != nil {
+			return nil, nil, nil, NewError(ErrorEVM, err)
+		}
 	}
-	requests, bal, err := core.PostExecution(context.Background(), chainConfig, vmContext.BlockNumber, vmContext.Time, allLogs, nil, evm, uint32(len(receipts)+1))
+	requests, bal, err := core.PostExecution(context.Background(), chainConfig, vmContext.BlockNumber, vmContext.Time, allLogs, tablesToWrite, evm, uint32(len(receipts)+1))
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("failed to process post-execution: %v", err))
 	}
