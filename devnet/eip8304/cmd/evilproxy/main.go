@@ -30,6 +30,9 @@ func main() {
 		mode     = flag.String("mode", "none", "rewrite mode: "+strings.Join(adversary.Modes, ", "))
 	)
 	flag.Parse()
+	if !strings.Contains(*upstream, "://") {
+		*upstream = "http://" + *upstream
+	}
 	if !contains(adversary.Modes, *mode) {
 		fmt.Fprintf(os.Stderr, "unknown mode %q\n", *mode)
 		os.Exit(2)

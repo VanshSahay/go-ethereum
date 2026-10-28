@@ -75,7 +75,9 @@ type PurethQueryResult struct {
 }
 
 // maxPurethLogs is the most logs a single proven query returns. A cut result
-// ends at a block boundary (lastBlock), from where the next page starts.
+// is trimmed to the limit and its proven range ends at the block of its last
+// log (lastBlock), which may be only partly included: the next page starts at
+// that block again.
 const maxPurethLogs = 10_000
 
 // PurethAPI exposes the trustless log index queries.
@@ -149,7 +151,7 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 		return nil, errors.New("limit must be positive")
 	}
 	if query.Limit > maxPurethLogs {
-		return nil, fmt.Errorf("limit %d exceeds the maximum of %d; page through the range using the returned lastBlock", query.Limit, maxPurethLogs)
+		return nil, fmt.Errorf("limit %d exceeds the maximum of %d; page through the range starting each page at the returned lastBlock", query.Limit, maxPurethLogs)
 	}
 	if query.FirstBlock == 0 {
 		return nil, errors.New("firstBlock must be at least 1")
