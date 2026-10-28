@@ -60,6 +60,21 @@ func (c sliceChain) GetIndexReceipts(hash common.Hash, number uint64) (types.Rec
 // a node indexing with the matching hierarchy serves proofs that a verifier
 // trusting only the contract's code accepts.
 func TestHistoricContractEndToEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sizes     []uint64
+		covered   uint64
+		wantRoots int
+	}{
+		{"1-4-16", []uint64{1, 4, 16}, 20, 24}, // 20 level-0 tables and the 4-block ones at 4, 8, 12, 16
+		{"1-4-16-64", []uint64{1, 4, 16, 64}, 140, 0},
+		{"1-8-64", []uint64{1, 8, 64}, 140, 0}, // a ratio other than four
+	} {
+		t.Run(tc.name, func(t *testing.T) { testHistoricContractEndToEnd(t, tc.sizes, tc.covered, tc.wantRoots) })
+	}
+}
+
+func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, wantRoots int) {
 	config := *params.MergedTestChainConfig
 	if config.EIP8304Time != nil {
 		t.Fatal("test config has EIP-8304 active")
@@ -68,7 +83,7 @@ func TestHistoricContractEndToEnd(t *testing.T) {
 	alloc := core.SystemContractAllocs()
 	alloc[emitter] = types.Account{Code: diffEmitterCode()}
 	alloc[rtSender] = types.Account{Balance: new(big.Int).Lsh(big.NewInt(1), 60)}
-	genesis := &core.Genesis{Config: &config, Alloc: alloc}
+	genesis := &core.Genesis{Config: &config, Alloc: alloc, GasLimit: 60_000_000} // room for storing hundreds of roots
 	engine := beacon.New(ethash.NewFaker())
 	signer := types.LatestSigner(&config)
 
@@ -81,20 +96,21 @@ func TestHistoricContractEndToEnd(t *testing.T) {
 		nonce++
 		gen.AddTx(tx)
 	}
-	const covered = 20
-	genDB, pre, preReceipts := core.GenerateChainWithGenesis(genesis, engine, covered, callGen)
+	genDB, pre, preReceipts := core.GenerateChainWithGenesis(genesis, engine, int(covered), callGen)
 	for i, b := range pre {
 		rawdb.WriteBlock(genDB, b)
 		rawdb.WriteReceipts(genDB, b.Hash(), b.NumberU64(), preReceipts[i])
 		rawdb.WriteCanonicalHash(genDB, b.Hash(), b.NumberU64())
 	}
-	sizes := []uint64{1, 4, 16}
 	roots, err := logindex.ExportTableRoots(sliceChain{pre, preReceipts}, pre[covered-1].Header(), sizes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roots) != covered+covered/4-1 { // 20 level-0 tables and the 4-block ones at 4, 8, 12, 16
-		t.Fatalf("exported %d roots", len(roots))
+	if wantRoots != 0 && len(roots) != wantRoots {
+		t.Fatalf("exported %d roots, want %d", len(roots), wantRoots)
+	}
+	if len(roots) < int(covered) {
+		t.Fatalf("exported only %d roots for %d blocks", len(roots), covered)
 	}
 
 	// the contract goes in with a transaction in the block after them
@@ -102,7 +118,7 @@ func TestHistoricContractEndToEnd(t *testing.T) {
 	post, _ := core.GenerateChain(&config, pre[covered-1], engine, genDB, 8, func(i int, gen *core.BlockGen) {
 		if i == 0 {
 			tx, _ := types.SignNewTx(rtKey, signer, &types.LegacyTx{
-				Nonce: nonce, Gas: 2_000_000, Data: HistoricInitCode(roots), GasPrice: new(big.Int).Add(gen.BaseFee(), big.NewInt(1)),
+				Nonce: nonce, Gas: 200_000 + 25_000*uint64(len(roots)), Data: HistoricInitCode(roots), GasPrice: new(big.Int).Add(gen.BaseFee(), big.NewInt(1)),
 			})
 			nonce++
 			gen.AddTx(tx)
