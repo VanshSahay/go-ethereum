@@ -107,7 +107,12 @@ func newTableFiles(path string, maxFileSize int64, maxOpenFiles int) (*tableFile
 			continue
 		}
 		if name == memFileName {
+			// the file stays in place until a newer one atomically replaces
+			// it: a crash right after startup must not lose the small tables
 			tf.loadMemTables()
+			continue
+		}
+		if name == memFileName+".tmp" {
 			os.Remove(filepath.Join(path, name))
 			continue
 		}
@@ -256,7 +261,9 @@ func (tf *tableFiles) storeMemTables() {
 func (tf *tableFiles) collectMemTablesLocked() []storedMemTable {
 	var memTables []storedMemTable
 	for name, fi := range tf.tableFiles {
-		if fi.fileCount != 0 {
+		// tables still being written are incomplete; a finished table's data
+		// is immutable, and the unlock publishes it to this goroutine
+		if fi.fileCount != 0 || fi.isLocked() {
 			continue
 		}
 		memTables = append(memTables, storedMemTable{
@@ -272,6 +279,9 @@ func (tf *tableFiles) writeMemTables(memTables []storedMemTable) {
 	f, err := os.OpenFile(fn+".tmp", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err == nil {
 		err = rlp.Encode(f, memTables)
+		if err == nil {
+			err = f.Sync()
+		}
 		err2 := f.Close()
 		if err == nil {
 			err = err2
@@ -280,9 +290,25 @@ func (tf *tableFiles) writeMemTables(memTables []storedMemTable) {
 	if err == nil {
 		err = os.Rename(fn+".tmp", fn)
 	}
+	if err == nil {
+		err = syncDir(tf.path)
+	}
 	if err != nil {
 		log.Error("Could not save small index table files", "error", err)
 	}
+}
+
+// syncDir flushes a directory so renames and creations in it survive a crash.
+func syncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
+	}
+	return nil
 }
 
 func (tf *tableFiles) getReaderAt(name string) (io.ReaderAt, int64, error) {
@@ -440,6 +466,9 @@ func (fi *tableFileInfo) Write(p []byte) (n int, err error) {
 	if err := fi.writer.Flush(); err != nil {
 		return n, err
 	}
+	if err := fi.file.Sync(); err != nil {
+		return n, err
+	}
 	if err := fi.file.Close(); err != nil {
 		return n, err
 	}
@@ -460,6 +489,9 @@ func (fi *tableFileInfo) Close() error {
 	}
 	if fi.fileCount != 0 {
 		if err := fi.writer.Flush(); err != nil {
+			return err
+		}
+		if err := fi.file.Sync(); err != nil {
 			return err
 		}
 		if err := fi.file.Close(); err != nil {
@@ -508,7 +540,7 @@ func (tf *tableFiles) renameFile(oldName, newName string) error {
 	}
 	fi.name = newName
 	tf.tableFiles[newName] = fi
-	return nil
+	return syncDir(tf.path)
 }
 
 // deleteFile deletes all os file chunks of the table file with the given name
@@ -528,6 +560,9 @@ func (tf *tableFiles) deleteFile(name string) error {
 	delete(tf.tableFiles, name)
 	if fi.fileCount == 0 {
 		atomic.AddInt64(&fi.tf.memFileTotal, -fi.size)
+		// the stored small table file still lists this table: rewrite it soon
+		// so a deleted (for example reorged) table cannot come back
+		tf.memNewTables = memFlushThreshold
 	}
 	for i := range fi.fileCount {
 		id := osFileID{tfInfo: fi, fileIndex: i}

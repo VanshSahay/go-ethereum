@@ -34,6 +34,15 @@ const (
 	logIndexPollInterval = 5 * time.Second
 )
 
+// logIndexHistory is the number of recent blocks the log index keeps tables
+// for: older ranges are trimmed, bounding its storage.
+func (cfg *BlockChainConfig) logIndexHistory() uint64 {
+	if cfg.LogIndexHistory == 0 {
+		return defaultLogIndexCatchup
+	}
+	return cfg.LogIndexHistory
+}
+
 // The log index only serves queries: the table roots committed on chain are
 // derived from the block history (see DeriveLogIndexWrites), never from the
 // index. It therefore follows the canonical head asynchronously, outside the
@@ -103,12 +112,10 @@ func (bc *BlockChain) SyncLogIndex() {
 func (bc *BlockChain) reconcileLogIndex(head *types.Header) {
 	ix := bc.logIndex
 	if ix.HeadHash() == head.Hash() {
+		bc.backfillLogIndex(head)
 		return
 	}
-	limit := int(bc.cfg.LogIndexHistory)
-	if limit == 0 {
-		limit = defaultLogIndexCatchup
-	}
+	limit := int(bc.cfg.logIndexHistory())
 	var old *types.Header
 	if hash := ix.HeadHash(); hash != (common.Hash{}) {
 		old = bc.GetHeader(hash, ix.HeadBlock())
@@ -150,5 +157,35 @@ func (bc *BlockChain) reconcileLogIndex(head *types.Header) {
 			return
 		}
 		ix.AddBlockData(header, body, receipts)
+	}
+}
+
+// logIndexBackfillBatch bounds the blocks repaired per reconciliation.
+const logIndexBackfillBatch = 4096
+
+// backfillLogIndex repairs holes in the retained range of the index, oldest
+// first, reading the blocks of the canonical chain ending at head.
+func (bc *BlockChain) backfillLogIndex(head *types.Header) {
+	ix := bc.logIndex
+	missing := ix.MissingBlocks()
+	if missing.IsEmpty() {
+		return
+	}
+	done := 0
+	for n := range missing.Iter() {
+		if done >= logIndexBackfillBatch {
+			return
+		}
+		hash := bc.GetCanonicalHash(n)
+		header := bc.GetHeader(hash, n)
+		if header == nil || ix.HeadHash() != head.Hash() {
+			return
+		}
+		receipts, err := bc.GetIndexReceipts(hash, n)
+		if err != nil {
+			continue // receipts pruned: the block stays unindexed
+		}
+		ix.Backfill(header, receipts)
+		done++
 	}
 }

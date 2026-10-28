@@ -408,3 +408,49 @@ func (ix *Indexer) Stop() {
 		ix.files.close()
 	}
 }
+
+// MissingBlocks returns the blocks of the retained range [tail, head] that no
+// complete table covers, for example after a crash lost unflushed small
+// tables. They can be repaired with Backfill.
+func (ix *Indexer) MissingBlocks() common.RangeSet[uint64] {
+	ix.lock.Lock()
+	defer ix.lock.Unlock()
+
+	if ix.shutdown || ix.headBlock == 0 {
+		return nil
+	}
+	complete, _, initPhase := ix.storage.tables()
+	if initPhase {
+		return nil
+	}
+	start := max(ix.tailBlock(), 1)
+	if start > ix.headBlock {
+		return nil
+	}
+	missing := common.SingleRangeSet[uint64](common.NewRange[uint64](start, ix.headBlock+1-start))
+	for level, rs := range complete {
+		covered := shiftRangeSetLevel(rs, ix.params.tableLevels[level], ix.params.tableLevels[0], false)
+		missing = missing.Difference(covered)
+	}
+	return missing
+}
+
+// Backfill builds the level-0 table of a block below the index head that is
+// missing. The head is not moved; the block must be on the chain the index
+// follows.
+func (ix *Indexer) Backfill(header *types.Header, receipts types.Receipts) {
+	ix.lock.Lock()
+	if ix.shutdown || header.Number.Uint64() >= ix.headBlock {
+		ix.lock.Unlock()
+		return
+	}
+	ix.lock.Unlock()
+	err := ix.processBlockTable(header, receipts)
+	if err == nil {
+		ix.lock.Lock()
+		ix.updateTableOperations()
+		ix.lock.Unlock()
+	} else {
+		log.Error("Failed to backfill log index block", "number", header.Number, "error", err)
+	}
+}

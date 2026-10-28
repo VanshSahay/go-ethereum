@@ -271,3 +271,31 @@ func TestGetRangeReadersPublicationFilter(t *testing.T) {
 		}
 	}
 }
+
+// TestBackfillMissingBlocks pins that a hole below the index head is reported
+// and repaired without moving the head.
+func TestBackfillMissingBlocks(t *testing.T) {
+	f := newTestFeed(100)
+	ix := NewMemoryIndexer()
+	defer ix.Stop()
+	for i := 1; i <= 100; i++ {
+		if i == 50 {
+			continue
+		}
+		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
+	}
+	waitIdle(t, ix)
+	missing := ix.MissingBlocks()
+	if missing.Count() != 1 || !missing.Includes(50) {
+		t.Fatalf("missing blocks %v, want {50}", missing)
+	}
+	ix.Backfill(f.headers[50], f.receipts[50])
+	waitIdle(t, ix)
+	if !ix.MissingBlocks().IsEmpty() {
+		t.Fatalf("still missing %v after backfill", ix.MissingBlocks())
+	}
+	if ix.HeadBlock() != 100 {
+		t.Errorf("backfill moved the head to %d", ix.HeadBlock())
+	}
+	coverageGaps(t, ix, 1, 101)
+}

@@ -17,6 +17,8 @@
 package logindex
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -108,4 +110,78 @@ func TestRestartAfterCrash(t *testing.T) {
 	// the flush threshold guarantees at least two full flushes worth of
 	// level-0 tables
 	coverageGaps(t, ix2, 1, 129)
+}
+
+// TestRestartThenCrash pins that the small table file survives a startup
+// that is itself followed by a crash: loading it must not remove it before a
+// newer one has replaced it.
+func TestRestartThenCrash(t *testing.T) {
+	path := t.TempDir()
+	f := newTestFeed(200)
+	canonical := func(n uint64) common.Hash { return f.headers[n].Hash() }
+
+	ix, err := NewIndexer(DefaultParams(), Config{BlockHashAt: canonical}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 200; i++ {
+		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
+	}
+	waitIdle(t, ix)
+	ix.Stop()
+
+	// first restart, abandoned without Stop
+	ix2, err := NewIndexer(DefaultParams(), Config{BlockHashAt: canonical}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kickIndexer(t, ix2)
+	// second restart finds the same tables
+	ix3, err := NewIndexer(DefaultParams(), Config{BlockHashAt: canonical}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ix3.Stop()
+		ix2.Stop()
+	}()
+	kickIndexer(t, ix3)
+	coverageGaps(t, ix3, 1, 201)
+}
+
+// TestCorruptSmallTables pins that a truncated small table file does not
+// stop the indexer from starting and indexing.
+func TestCorruptSmallTables(t *testing.T) {
+	path := t.TempDir()
+	f := newTestFeed(100)
+	canonical := func(n uint64) common.Hash { return f.headers[n].Hash() }
+
+	ix, err := NewIndexer(DefaultParams(), Config{BlockHashAt: canonical}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 50; i++ {
+		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
+	}
+	waitIdle(t, ix)
+	ix.Stop()
+
+	fn := filepath.Join(path, memFileName)
+	blob, err := os.ReadFile(fn)
+	if err != nil || len(blob) < 8 {
+		t.Fatalf("small table file: %v (%d bytes)", err, len(blob))
+	}
+	if err := os.WriteFile(fn, blob[:len(blob)/2], 0644); err != nil {
+		t.Fatal(err)
+	}
+	ix2, err := NewIndexer(DefaultParams(), Config{BlockHashAt: canonical}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix2.Stop()
+	for i := 51; i <= 100; i++ {
+		ix2.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
+	}
+	waitIdle(t, ix2)
+	coverageGaps(t, ix2, 51, 101)
 }

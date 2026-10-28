@@ -362,7 +362,7 @@ var (
 	}
 	LogIndexHistoryFlag = &cli.Uint64Flag{
 		Name:     "logindex.history",
-		Usage:    "Number of recent blocks the EIP-8304 log index catches up to on a fresh start (0 = default 65536)",
+		Usage:    "Number of recent blocks the EIP-8304 log index catches up to on a fresh start (default 65536); older ranges are trimmed",
 		Category: flags.StateCategory,
 	}
 	LogExportCheckpointsFlag = &cli.StringFlag{

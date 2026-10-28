@@ -457,7 +457,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 			// the canonical hash source lets a restart validate its persisted
 			// tables against the chain instead of dropping them
 			ix, err = logindex.NewIndexer(logindex.DefaultParams(), logindex.Config{
-				History: cfg.LogIndexHistory,
+				History: cfg.logIndexHistory(),
 				BlockHashAt: func(n uint64) common.Hash {
 					if header := bc.GetHeaderByNumber(n); header != nil {
 						return header.Hash()
