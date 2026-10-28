@@ -1,5 +1,5 @@
 # Minimal image wrapping the locally-built static geth binary.
-# Build: docker build -t my-geth:bal -f devnet/Dockerfile .
+# Build: docker build -t my-geth:8304 -f devnet/eip8304/Dockerfile .
 FROM alpine:latest
 
 RUN apk add --no-cache ca-certificates

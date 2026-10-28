@@ -3,10 +3,17 @@
 # against eth_getLogs, independent proof verification, tamper and absence
 # demos, and indexer restart resilience.
 #
-# Usage: check.sh <rpc-url>
-# Prerequisites: deploy.sh has run (devnet/eip8304/deployed_block exists),
-# the spammer is producing ERC-20 transfers, and the script is invoked from a
-# checkout of this repository (the verifier runs through go run).
+# Usage: check.sh <rpc-url> [<second-participant-rpc-url>]
+#
+# With a second participant (the devnet runs one with --logindex.disable) the
+# script also checks that both nodes follow the same chain: the table roots are
+# derived from the chain history, so a node without an index must not diverge.
+# Prerequisites: the devnet runs geth with --override.eip8304=0 (see
+# args.json), so the node deployed the index contract at the first block (an
+# optional devnet/eip8304/deployed_block overrides the first indexed block, and
+# deploy.sh is only a debugging fallback), the spammer is producing ERC-20
+# transfers, and the script is invoked from a checkout of this repository (the
+# verifier runs through go run).
 set -euo pipefail
 RPC="$1"
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -35,9 +42,22 @@ verify_proof() {
   local ref_number ref_hash
   ref_number=$(jq -r '.refHeader.number' "$proof")
   ref_hash=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
-  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":18446744073709551615,"limitLatest":false}' "$topic" "$FROM" "$TO" > "$OUT/query.json"
+  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":10000,"limitLatest":false}' "$topic" "$FROM" "$TO" > "$OUT/query.json"
   ( cd "$REPO" && go run ./devnet/eip8304/cmd/verify -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@" )
 }
+
+if [ -n "${2:-}" ]; then
+  echo "== consensus parity with the index-less participant =="
+  HEAD=$(cast block-number --rpc-url "$RPC")
+  CHECK=$((HEAD > 8 ? HEAD - 8 : 1))
+  A=$(cast block "$CHECK" --rpc-url "$RPC" --field hash)
+  B=$(cast block "$CHECK" --rpc-url "$2" --field hash)
+  if [ "$A" != "$B" ]; then
+    echo "participants disagree at block $CHECK: $A vs $B" >&2
+    exit 1
+  fi
+  echo "block $CHECK: $A on both participants"
+fi
 
 echo "== waiting for the index to accumulate blocks =="
 TARGET=$((DEPLOY + 360))
@@ -73,6 +93,7 @@ done
 
 echo
 echo "== query parity: pureth_getLogsWithProofV1 vs eth_getLogs =="
+# one proven query returns at most 10000 logs (the RPC default); keep the range below that
 FROM=$((DEPLOY + 2))
 TO=$((HEAD - 2))
 PURETH_PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"}' "$TRANSFER" "$FROM" "$TO")

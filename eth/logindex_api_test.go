@@ -19,7 +19,6 @@ package eth
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"math/big"
 	"testing"
 
@@ -130,7 +129,7 @@ func TestPurethGetLogsWithProof(t *testing.T) {
 		Pattern:    pattern,
 		FirstBlock: 1,
 		LastBlock:  trusted.Number.Uint64(),
-		Limit:      math.MaxUint64,
+		Limit:      10_000,
 	}, opts)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
@@ -187,7 +186,7 @@ func TestPurethGetLogsWithProof(t *testing.T) {
 		Pattern:    pattern,
 		FirstBlock: 1,
 		LastBlock:  refNumber,
-		Limit:      math.MaxUint64,
+		Limit:      10_000,
 	}, opts)
 	if err != nil {
 		t.Fatalf("historical verify: %v", err)
@@ -234,6 +233,7 @@ func TestPurethQueryRejects(t *testing.T) {
 		"zero first":     {Address: addr, FirstBlock: hu(0)},
 		"last above ref": {Address: addr, LastBlock: hu(1000)},
 		"zero limit":     {Address: addr, Limit: hu(0)},
+		"limit too high": {Address: addr, Limit: hu(10_001)},
 		"address twice":  {Address: addr, Addresses: []common.Address{{2}}},
 	} {
 		if _, err := api.GetLogsWithProofV1(context.Background(), args); err == nil {
@@ -273,7 +273,7 @@ func TestPurethRLPEncoding(t *testing.T) {
 		t.Fatal(err)
 	}
 	trusted := bc.CurrentBlock()
-	res, err := decoded.Verify(trusted, logquery.FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: trusted.Number.Uint64(), Limit: math.MaxUint64}, logquery.DefaultVerifyOptions(bc.Config()))
+	res, err := decoded.Verify(trusted, logquery.FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: trusted.Number.Uint64(), Limit: 10_000}, logquery.DefaultVerifyOptions(bc.Config()))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}

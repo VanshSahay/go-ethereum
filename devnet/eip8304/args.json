@@ -38,6 +38,18 @@
         "--ws.api=admin,engine,net,eth,web3,debug,txpool,pureth",
         "--override.eip8304=0"
       ]
+    },
+    {
+      "el_type": "geth",
+      "el_image": "my-geth:8304",
+      "cl_type": "lighthouse",
+      "cl_image": "ethpandaops/lighthouse:unstable",
+      "count": 1,
+      "el_extra_params": [
+        "--http.api=admin,engine,net,eth,web3,debug,txpool",
+        "--override.eip8304=0",
+        "--logindex.disable"
+      ]
     }
   ],
   "network_params": {

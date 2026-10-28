@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -74,6 +73,10 @@ type PurethQueryResult struct {
 	Proof      *logquery.QueryProof `json:"proof,omitempty"`
 	ProofRLP   hexutil.Bytes        `json:"proofRlp,omitempty"`
 }
+
+// maxPurethLogs is the most logs a single proven query returns. A cut result
+// ends at a block boundary (lastBlock), from where the next page starts.
+const maxPurethLogs = 10_000
 
 // PurethAPI exposes the trustless log index queries.
 type PurethAPI struct {
@@ -130,7 +133,7 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 		Pattern:     pattern,
 		FirstBlock:  1,
 		LastBlock:   refHeader.Number.Uint64(),
-		Limit:       math.MaxUint64,
+		Limit:       maxPurethLogs,
 		LimitLatest: args.LimitLatest,
 	}
 	if args.FirstBlock != nil {
@@ -144,6 +147,9 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 	}
 	if query.Limit == 0 {
 		return nil, errors.New("limit must be positive")
+	}
+	if query.Limit > maxPurethLogs {
+		return nil, fmt.Errorf("limit %d exceeds the maximum of %d; page through the range using the returned lastBlock", query.Limit, maxPurethLogs)
 	}
 	if query.FirstBlock == 0 {
 		return nil, errors.New("firstBlock must be at least 1")
