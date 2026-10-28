@@ -22,6 +22,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"sort"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -59,6 +60,11 @@ var ErrMatchAll = errors.New("match-all queries not allowed")
 type PatternMatcher interface {
 	matchLogs(logs []*types.Log, index int) bool
 	candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool)
+
+	// estimate returns a cheap upper-level estimate of the number of entries
+	// candidates would read, or false when the source cannot tell. It lets an
+	// allOf leave out children that cannot pay for their entry run.
+	estimate(src runSource, begin, end types.IndexPosition) (int, bool)
 	json.Marshaler
 }
 
@@ -77,6 +83,10 @@ type runSource interface {
 	// leave out the entries of the discarded ones from the proof.
 	mark() int
 	drop(from, to int)
+
+	// runSize estimates the number of entries of the given (type, content)
+	// pair within [begin, end] without reading them.
+	runSize(typ uint32, content []byte, begin, end types.IndexPosition) (int, bool)
 }
 
 // matcherValue is the searchable content of a leaf matcher: an entry type plus
@@ -311,6 +321,10 @@ func (m *singleMatcher) candidates(src runSource, begin, end types.IndexPosition
 	return src.valueRun(m.value.typ, m.value.content, begin, end)
 }
 
+func (m *singleMatcher) estimate(src runSource, begin, end types.IndexPosition) (int, bool) {
+	return src.runSize(m.value.typ, m.value.content, begin, end)
+}
+
 func (m *singleMatcher) MarshalJSON() ([]byte, error) {
 	enc := struct {
 		Type  string        `json:"field"`
@@ -376,6 +390,12 @@ func (m *offsetMatcher) candidates(src runSource, begin, end types.IndexPosition
 	return shifted, true
 }
 
+func (m *offsetMatcher) estimate(src runSource, begin, end types.IndexPosition) (int, bool) {
+	addOffset(&begin, m.offset)
+	addOffset(&end, m.offset)
+	return m.child.estimate(src, begin, end)
+}
+
 func (m *offsetMatcher) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Offset PatternMatcher `json:"offset"`
@@ -410,6 +430,19 @@ func (m matchAny) candidates(src runSource, begin, end types.IndexPosition) (ind
 		sets[i] = set
 	}
 	return ipsUnion(sets), true
+}
+
+// estimate is the sum of the children's runs: a union reads all of them.
+func (m matchAny) estimate(src runSource, begin, end types.IndexPosition) (int, bool) {
+	var total int
+	for _, mm := range m {
+		n, ok := mm.estimate(src, begin, end)
+		if !ok {
+			return 0, false
+		}
+		total += n
+	}
+	return total, true
 }
 
 func (m matchAny) MarshalJSON() ([]byte, error) {
@@ -447,11 +480,42 @@ func (m matchAll) candidates(src runSource, begin, end types.IndexPosition) (ind
 		set      indexPositionSet
 		from, to int // the entries this child's evaluation touched
 	}
-	var children []child
-	for _, mm := range m {
+	// Evaluate the children cheapest first and leave out one whose run cannot
+	// pay for itself: reading its run costs its size and saves at most one
+	// receipt per candidate of the best set so far. This also keeps a huge run
+	// (a busy address next to a rare topic) from being read at all. When a
+	// source cannot estimate, every child is evaluated.
+	order := make([]int, len(m))
+	for i := range order {
+		order[i] = i
+	}
+	estimates := make([]int, len(m))
+	known := true
+	for i, mm := range m {
+		n, ok := mm.estimate(src, begin, end)
+		if !ok {
+			known = false
+			break
+		}
+		estimates[i] = n
+	}
+	if known {
+		sort.SliceStable(order, func(a, b int) bool { return estimates[order[a]] < estimates[order[b]] })
+	}
+	var (
+		children []child
+		bestLen  = -1
+	)
+	for _, i := range order {
+		if known && bestLen >= 0 && estimates[i] >= bestLen*receiptCost {
+			continue
+		}
 		from := src.mark()
-		if set, ok := mm.candidates(src, begin, end); ok {
+		if set, ok := m[i].candidates(src, begin, end); ok {
 			children = append(children, child{set, from, src.mark()})
+			if bestLen < 0 || len(set) < bestLen {
+				bestLen = len(set)
+			}
 		}
 	}
 	if len(children) == 0 {
@@ -482,6 +546,17 @@ func (m matchAll) candidates(src runSource, begin, end types.IndexPosition) (ind
 		}
 	}
 	return children[best].set, true
+}
+
+// estimate is the cheapest child's run: one bounded child bounds the pattern.
+func (m matchAll) estimate(src runSource, begin, end types.IndexPosition) (int, bool) {
+	best, found := 0, false
+	for _, mm := range m {
+		if n, ok := mm.estimate(src, begin, end); ok && (!found || n < best) {
+			best, found = n, true
+		}
+	}
+	return best, found
 }
 
 func (m matchAll) MarshalJSON() ([]byte, error) {

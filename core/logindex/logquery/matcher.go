@@ -335,6 +335,26 @@ func (rs *readerSource) drop(from, to int) {
 	rs.touched = slices.Delete(rs.touched, from, to)
 }
 
+func (rs *readerSource) runSize(typ uint32, content []byte, begin, end types.IndexPosition) (int, bool) {
+	if rs.err != nil {
+		return 0, false
+	}
+	low, _, err := rs.reader.SeekEntry(valueBoundary(typ, content, begin))
+	if err != nil {
+		rs.err = err
+		return 0, false
+	}
+	high, _, err := rs.reader.SeekEntry(valueBoundary(typ, content, end))
+	if err != nil {
+		rs.err = err
+		return 0, false
+	}
+	if high < low {
+		return 0, true
+	}
+	return int(high-low) + 1, true
+}
+
 func (rs *readerSource) valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool) {
 	if rs.err != nil {
 		return nil, false

@@ -351,3 +351,39 @@ func TestCursorPagination(t *testing.T) {
 		}
 	}
 }
+
+// TestAllOfSkipsHugeRuns pins that an allOf does not read the run of a child
+// that cannot pay for itself: a busy address next to a rare topic is served
+// under a candidate cap far below the address's run.
+func TestAllOfSkipsHugeRuns(t *testing.T) {
+	rtc := newRTChainWith(t, 40, diffEmitterCode(), func(block int) int { return block%3 + 1 })
+	emitter := crypto.CreateAddress(rtSender, 1)
+	trusted, opts := rtc.bc.CurrentBlock(), DefaultVerifyOptions(rtc.bc.Config())
+
+	// topic0=B is on one log per call, the address on four
+	pattern, err := NewPatternMatcherFromJSON(json.RawMessage(fmt.Sprintf(`{"allOf":[%s,%s]}`, addrLeaf(emitter), topicLeaf(0, topicB))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtc.matcher.MaxCandidates = 100
+	req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: 39, Limit: 1000}
+	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
+	if err != nil {
+		t.Fatalf("the cheap child should have served the query: %v", err)
+	}
+	res, err := proof.Verify(trusted, req, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) == 0 || len(res.Logs) != len(logs) {
+		t.Fatalf("served %d logs, verified %d", len(logs), len(res.Logs))
+	}
+	// the address alone is over the cap
+	alone, err := NewPatternMatcherFromJSON(json.RawMessage(addrLeaf(emitter)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, FilterQuery{Pattern: alone, FirstBlock: 1, LastBlock: 39, Limit: 1000}, true); err == nil {
+		t.Error("the address alone fits the cap, the test does not exercise the skip")
+	}
+}

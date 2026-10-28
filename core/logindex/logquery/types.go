@@ -139,6 +139,12 @@ func valueBoundary(typ uint32, content []byte, p types.IndexPosition) types.Inde
 func (tqp *tableQueryProof) mark() int     { return 0 }
 func (tqp *tableQueryProof) drop(int, int) {}
 
+// runSize implements runSource: the verifier cannot estimate, so it evaluates
+// every child of a pattern.
+func (tqp *tableQueryProof) runSize(uint32, []byte, types.IndexPosition, types.IndexPosition) (int, bool) {
+	return 0, false
+}
+
 func (tqp *tableQueryProof) valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool) {
 	n := len(tqp.ProvenEntries)
 	if n == 0 {
