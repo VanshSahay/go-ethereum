@@ -81,6 +81,7 @@ func newAPIChain(t *testing.T, blocks int, disableIndex bool) (*core.BlockChain,
 	if _, err := bc.InsertChain(genBlocks); err != nil {
 		t.Fatalf("insert chain: %v", err)
 	}
+	bc.SyncLogIndex() // the queries only take a few blocks themselves
 	backend := &EthAPIBackend{eth: &Ethereum{blockchain: bc}}
 	return bc, backend, emitterAddr
 }

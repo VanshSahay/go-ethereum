@@ -103,7 +103,25 @@ func (bc *BlockChain) SyncLogIndex() {
 	defer bc.logIndexMu.Unlock()
 
 	if head := bc.CurrentBlock(); head != nil {
-		bc.reconcileLogIndex(head)
+		bc.reconcileLogIndex(head, false)
+	}
+}
+
+// quickSyncBlocks bounds the work a query does to bring the index to the head.
+const quickSyncBlocks = 64
+
+// SyncLogIndexQuick is the query path's version of SyncLogIndex: it takes the
+// few blocks between the index and the head if that is all there is to do and
+// the follower is not busy, and otherwise leaves the catching up to the
+// follower instead of making the query wait for it.
+func (bc *BlockChain) SyncLogIndexQuick() {
+	if bc.logIndex == nil || !bc.logIndexMu.TryLock() {
+		return
+	}
+	defer bc.logIndexMu.Unlock()
+
+	if head := bc.CurrentBlock(); head != nil {
+		bc.reconcileLogIndex(head, true)
 	}
 }
 
@@ -111,13 +129,18 @@ func (bc *BlockChain) SyncLogIndex() {
 // the given canonical head and feeds the blocks above the ancestor, oldest
 // first. Blocks are read by hash from the database, so a concurrent reorg
 // cannot mix chains.
-func (bc *BlockChain) reconcileLogIndex(head *types.Header) {
+func (bc *BlockChain) reconcileLogIndex(head *types.Header, quick bool) {
 	ix := bc.logIndex
 	if ix.HeadHash() == head.Hash() {
-		bc.backfillLogIndex(head)
+		if !quick {
+			bc.backfillLogIndex(head)
+		}
 		return
 	}
 	limit := int(bc.cfg.logIndexHistory())
+	if quick {
+		limit = quickSyncBlocks
+	}
 	var old *types.Header
 	if hash := ix.HeadHash(); hash != (common.Hash{}) {
 		old = bc.GetHeader(hash, ix.HeadBlock())
@@ -143,6 +166,9 @@ func (bc *BlockChain) reconcileLogIndex(head *types.Header) {
 		if cur = bc.GetHeader(cur.ParentHash, cur.Number.Uint64()-1); cur == nil {
 			break
 		}
+	}
+	if quick && !found {
+		return // too far behind for a query to wait for: the follower catches up
 	}
 	if found && old != nil && ix.HeadBlock() > old.Number.Uint64() {
 		ix.Revert(old)

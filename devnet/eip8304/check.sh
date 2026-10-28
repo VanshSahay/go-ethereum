@@ -242,7 +242,9 @@ echo "== restart resilience (file-backed indexer reload) =="
 cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$PURETH_PARAMS" > "$OUT/result1.json"
 N_BEFORE=$(jq '.logs | length' "$OUT/result1.json")
 EL_CONTAINER=$(docker ps --format '{{.Names}}' | grep 'el-1-geth' | head -1)
-docker restart "$EL_CONTAINER" > /dev/null
+# the harness stops containers after one second, too short for a clean state
+# journal: give the node time to shut down
+docker restart -t 60 "$EL_CONTAINER" > /dev/null
 # docker maps the published port again on restart: follow the container
 NEW_RPC=$(docker port "$EL_CONTAINER" 8545/tcp | head -1 | sed 's/^0\.0\.0\.0/127.0.0.1/')
 RPC=${NEW_RPC:-$RPC}
