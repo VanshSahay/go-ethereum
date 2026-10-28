@@ -87,6 +87,8 @@ var (
 		utils.ChainHistoryFlag,
 		utils.LogHistoryFlag,
 		utils.LogNoHistoryFlag,
+		utils.LogIndexDisableFlag,
+		utils.LogIndexHistoryFlag,
 		utils.LogExportCheckpointsFlag,
 		utils.StateHistoryFlag,
 		utils.TrienodeHistoryFlag,

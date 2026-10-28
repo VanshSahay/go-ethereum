@@ -382,7 +382,7 @@ type BlockChain struct {
 	logIndexMu   sync.Mutex     // serializes reconciliations of the log index
 	logIndexQuit chan struct{}  // closed to stop the log index follower
 	logIndexWg   sync.WaitGroup // tracks the log index follower
-	logger     *tracing.Hooks
+	logger       *tracing.Hooks
 
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
 	slowBlockThreshold time.Duration // Block execution time threshold beyond which detailed statistics will be logged

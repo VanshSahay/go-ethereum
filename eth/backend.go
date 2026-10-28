@@ -250,8 +250,8 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			StateScheme:             scheme,
 			HistoryPolicy:           histPolicy,
 			LogIndexPath:            stack.ResolvePath("logindex"),
-			LogIndexDisabled:        config.LogNoHistory,
-			LogIndexHistory:         config.LogHistory,
+			LogIndexDisabled:        config.LogIndexDisable,
+			LogIndexHistory:         config.LogIndexHistory,
 			TxLookupLimit:           int64(min(config.TransactionHistory, math.MaxInt64)),
 			VmConfig: vm.Config{
 				EnablePreimageRecording: config.EnablePreimageRecording,

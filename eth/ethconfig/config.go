@@ -110,9 +110,13 @@ type Config struct {
 	// Deprecated: use 'TransactionHistory' instead.
 	TxLookupLimit uint64 `toml:",omitempty"` // The maximum number of blocks from head whose tx indices are reserved.
 
-	TransactionHistory   uint64 `toml:",omitempty"` // The maximum number of blocks from head whose tx indices are reserved.
-	LogHistory           uint64 `toml:",omitempty"` // The maximum number of blocks from head where a log search index is maintained.
-	LogNoHistory         bool   `toml:",omitempty"` // No log search index is maintained.
+	TransactionHistory uint64 `toml:",omitempty"` // The maximum number of blocks from head whose tx indices are reserved.
+	LogHistory         uint64 `toml:",omitempty"` // The maximum number of blocks from head where a log search index is maintained.
+	LogNoHistory       bool   `toml:",omitempty"` // No log search index is maintained.
+
+	// EIP-8304 trustless log index (serving only; block validation never depends on it)
+	LogIndexDisable      bool   `toml:",omitempty"` // Do not maintain the EIP-8304 index tables
+	LogIndexHistory      uint64 `toml:",omitempty"` // Number of recent blocks the EIP-8304 index catches up to (0 = default)
 	LogExportCheckpoints string // export log index checkpoints to file
 	StateHistory         uint64 `toml:",omitempty"` // The maximum number of blocks from head whose state histories are reserved.
 	TrienodeHistory      int64  `toml:",omitempty"` // Number of blocks from the chain head for which trienode histories are retained

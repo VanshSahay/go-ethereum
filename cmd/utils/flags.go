@@ -355,6 +355,16 @@ var (
 		Usage:    "Do not maintain log search index",
 		Category: flags.StateCategory,
 	}
+	LogIndexDisableFlag = &cli.BoolFlag{
+		Name:     "logindex.disable",
+		Usage:    "Do not maintain the EIP-8304 trustless log index (block validation is unaffected)",
+		Category: flags.StateCategory,
+	}
+	LogIndexHistoryFlag = &cli.Uint64Flag{
+		Name:     "logindex.history",
+		Usage:    "Number of recent blocks the EIP-8304 log index catches up to on a fresh start (0 = default 65536)",
+		Category: flags.StateCategory,
+	}
 	LogExportCheckpointsFlag = &cli.StringFlag{
 		Name:     "history.logs.export",
 		Usage:    "Export checkpoints to file in go source file format",
@@ -1879,6 +1889,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(LogHistoryFlag.Name) {
 		cfg.LogHistory = ctx.Uint64(LogHistoryFlag.Name)
+	}
+	if ctx.IsSet(LogIndexDisableFlag.Name) {
+		cfg.LogIndexDisable = ctx.Bool(LogIndexDisableFlag.Name)
+	}
+	if ctx.IsSet(LogIndexHistoryFlag.Name) {
+		cfg.LogIndexHistory = ctx.Uint64(LogIndexHistoryFlag.Name)
 	}
 	if ctx.IsSet(LogNoHistoryFlag.Name) {
 		cfg.LogNoHistory = ctx.Bool(LogNoHistoryFlag.Name)
