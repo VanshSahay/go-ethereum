@@ -134,7 +134,6 @@ func (tc *testChain) bruteForce(addresses []common.Address, topics [][]common.Ha
 					clone.BlockHash = tc.headers[i].Hash()
 					clone.TxIndex = uint(txi)
 					clone.TxHash = tc.bodies[i].Transactions[txi].Hash()
-					clone.Index = uint(offset) + uint(l.TxIndex*0) // block-global index below
 					clone.Index = uint(blockGlobalIndex(tc, i, txi, l))
 					logs = append(logs, &clone)
 				}

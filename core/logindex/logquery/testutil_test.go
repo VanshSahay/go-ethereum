@@ -6,9 +6,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// logindexTableReader is the table reader type used in test signatures.
-type logindexTableReader = logindex.TableReader
-
 // memoryIndexer wraps the logindex memory indexer, exposing the
 // GetRangeReaders the Matcher consumes.
 type memoryIndexer struct {

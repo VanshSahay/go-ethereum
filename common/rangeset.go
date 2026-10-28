@@ -118,12 +118,12 @@ func (a RangeSet[T]) Union(b RangeSet[T]) RangeSet[T] {
 }
 
 // Iter iterates all integers in the range set.
-func (r RangeSet[T]) Iter() iter.Seq[T] {
+func (a RangeSet[T]) Iter() iter.Seq[T] {
 	return func(yield func(T) bool) {
-		for _, rr := range r {
-			for i := range rr.Iter() {
+		for _, r := range a {
+			for i := range r.Iter() {
 				if !yield(i) {
-					break
+					return
 				}
 			}
 		}

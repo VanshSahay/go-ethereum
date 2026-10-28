@@ -119,7 +119,7 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash) (tableQueryProof, 
 			ReceiptsProof:  bp.receiptsProof.proofForStorage(),
 		}
 		for txi := range bp.matchingTxs {
-			br.ProvenReceipts = append(br.ProvenReceipts, uint32(txi))
+			br.ProvenReceipts = append(br.ProvenReceipts, txi)
 		}
 		slices.Sort(br.ProvenReceipts)
 		proof.BlockResults[i] = br

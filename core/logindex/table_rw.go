@@ -703,7 +703,7 @@ func newFileTableWriter(params *Params, tf *tableFiles, name string, storedState
 			tw.lastSubtreeChunks[i] = sc
 		}
 		for i := range tw.format.subtreeLevels + 1 {
-			_, l, err := tf.getReaderAt(name + writeTempSuffix(uint(i)))
+			_, l, err := tf.getReaderAt(name + writeTempSuffix(i))
 			if err != nil {
 				tw.delete()
 				return nil, err
@@ -753,7 +753,7 @@ func (tw *tableWriter) delete() error {
 		finalErr = err
 	}
 	for i := range tw.format.subtreeLevels + 1 {
-		if err := tw.tf.deleteFile(tw.name + writeTempSuffix(uint(i))); err != nil && err != errFileNotFound {
+		if err := tw.tf.deleteFile(tw.name + writeTempSuffix(i)); err != nil && err != errFileNotFound {
 			finalErr = err
 		}
 	}
@@ -781,7 +781,7 @@ func (tw *tableWriter) open() error {
 	switch tw.phase {
 	case wpWriteEntries:
 		for i := range tw.format.subtreeLevels + 1 {
-			tw.writers[i], err = tw.tf.getAppendWriter(tw.name+writeTempSuffix(uint(i)), i < tw.format.memoryStorage)
+			tw.writers[i], err = tw.tf.getAppendWriter(tw.name+writeTempSuffix(i), i < tw.format.memoryStorage)
 			if err != nil {
 				return err
 			}
@@ -1043,7 +1043,7 @@ func (tw *tableWriter) finalize() (bool, error) {
 			}
 			tw.copyWriter = nil
 			for i := range tw.format.subtreeLevels {
-				if err := tw.tf.deleteFile(tw.name + writeTempSuffix(uint(i))); err != nil {
+				if err := tw.tf.deleteFile(tw.name + writeTempSuffix(i)); err != nil {
 					return false, err
 				}
 			}

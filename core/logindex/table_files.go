@@ -162,10 +162,6 @@ func (tf *tableFiles) allFiles() []string {
 	return res
 }
 
-func (tf *tableFiles) getMemFileTotal() uint64 {
-	return uint64(atomic.LoadInt64(&tf.memFileTotal))
-}
-
 func (tf *tableFiles) close() {
 	// Close still-locked files first (no tf.lock needed: the locked flag is
 	// per-file atomic), then delete them via deleteFile which takes the lock
