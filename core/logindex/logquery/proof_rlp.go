@@ -38,6 +38,7 @@ type rlpQuery struct {
 	LastBlock   uint64
 	Limit       uint64
 	LimitLatest bool
+	Cursor      []uint64 // empty, or block and log index
 }
 
 type rlpBlockResults struct {
@@ -90,6 +91,10 @@ func (p *QueryProof) EncodeRLP(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var cursor []uint64
+	if c := p.Query.Cursor; c != nil {
+		cursor = []uint64{c.Block, c.LogIndex}
+	}
 	enc := rlpQueryProof{
 		Query: rlpQuery{
 			Pattern:     pattern,
@@ -97,6 +102,7 @@ func (p *QueryProof) EncodeRLP(w io.Writer) error {
 			LastBlock:   p.Query.LastBlock,
 			Limit:       p.Query.Limit,
 			LimitLatest: p.Query.LimitLatest,
+			Cursor:      cursor,
 		},
 		RefHeader:          &p.RefHeader,
 		IndexContracts:     p.IndexContracts,
@@ -147,6 +153,14 @@ func (p *QueryProof) DecodeRLP(s *rlp.Stream) error {
 	if err != nil {
 		return err
 	}
+	var cursor *Cursor
+	switch len(dec.Query.Cursor) {
+	case 0:
+	case 2:
+		cursor = &Cursor{Block: dec.Query.Cursor[0], LogIndex: dec.Query.Cursor[1]}
+	default:
+		return errors.New("invalid cursor")
+	}
 	*p = QueryProof{
 		Query: FilterQuery{
 			Pattern:     pattern,
@@ -154,6 +168,7 @@ func (p *QueryProof) DecodeRLP(s *rlp.Stream) error {
 			LastBlock:   dec.Query.LastBlock,
 			Limit:       dec.Query.Limit,
 			LimitLatest: dec.Query.LimitLatest,
+			Cursor:      cursor,
 		},
 		RefHeader:          *dec.RefHeader,
 		IndexContracts:     dec.IndexContracts,

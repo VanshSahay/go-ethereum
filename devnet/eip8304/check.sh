@@ -42,7 +42,7 @@ verify_proof() {
   local ref_number ref_hash
   ref_number=$(jq -r '.refHeader.number' "$proof")
   ref_hash=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
-  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":10000,"limitLatest":false}' "$topic" "${VFROM:-$FROM}" "${VTO:-$TO}" > "$OUT/query.json"
+  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":10000,"limitLatest":false%s}' "$topic" "${VFROM:-$FROM}" "${VTO:-$TO}" "${VCURSOR:-}" > "$OUT/query.json"
   ( cd "$REPO" && go run ./devnet/eip8304/cmd/verify -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@" )
 }
 
@@ -99,29 +99,34 @@ TO=$((HEAD - 2))
 GETLOGS_PARAMS=$(printf '{"fromBlock":"0x%x","toBlock":"0x%x","topics":[["%s"]]}' "$FROM" "$TO" "$TRANSFER")
 cast rpc --rpc-url "$RPC" eth_getLogs "$GETLOGS_PARAMS" > "$OUT/getlogs.json"
 N_GETLOGS=$(jq 'length' "$OUT/getlogs.json")
-# page through the range: a page that reaches the limit is cut inside its last
-# block (lastBlock), so the next page starts at that block again and the logs
-# already received are dropped by (block, log index)
+# page through the range: a page that reaches the limit carries a nextCursor
+# (its last log), and the next page starts at that block after the cursor
 START=$FROM
+CURSOR=""
+VCURSOR_NEXT=""
 PAGE=0
 echo "[]" > "$OUT/pages.json"
 while [ "$START" -le "$TO" ]; do
-  PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"}' "$TRANSFER" "$START" "$TO")
+  PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"%s}' "$TRANSFER" "$START" "$TO" "$CURSOR")
   cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$PARAMS" > "$OUT/page$PAGE.json"
   PAGE_LAST=$(( $(jq -r '.lastBlock' "$OUT/page$PAGE.json") ))
   echo "  page $PAGE: blocks $START..$PAGE_LAST, $(jq '.logs | length' "$OUT/page$PAGE.json") logs"
   jq -s '.[0] + .[1].logs' "$OUT/pages.json" "$OUT/page$PAGE.json" > "$OUT/pages.tmp" && mv "$OUT/pages.tmp" "$OUT/pages.json"
   jq '.proof' "$OUT/page$PAGE.json" > "$OUT/proof$PAGE.json"
-  VFROM=$START verify_proof "$OUT/proof$PAGE.json" "$TRANSFER" > "$OUT/verify$PAGE.log" 2>&1 || { cat "$OUT/verify$PAGE.log" >&2; echo "page $PAGE failed verification" >&2; exit 1; }
-  N_PAGE=$(jq '.logs | length' "$OUT/page$PAGE.json")
-  if [ "$N_PAGE" -ge 10000 ] && [ "$PAGE_LAST" -ge "$START" ]; then
-    START=$PAGE_LAST
+  VFROM=$START VCURSOR=$VCURSOR_NEXT verify_proof "$OUT/proof$PAGE.json" "$TRANSFER" > "$OUT/verify$PAGE.log" 2>&1 || { cat "$OUT/verify$PAGE.log" >&2; echo "page $PAGE failed verification" >&2; exit 1; }
+  if [ "$(jq -r '.nextCursor // empty' "$OUT/page$PAGE.json")" != "" ]; then
+    CUR_BLOCK=$(( $(jq -r '.nextCursor.block' "$OUT/page$PAGE.json") ))
+    CUR_INDEX=$(( $(jq -r '.nextCursor.logIndex' "$OUT/page$PAGE.json") ))
+    CURSOR=$(printf ',"cursor":{"block":"0x%x","logIndex":"0x%x"}' "$CUR_BLOCK" "$CUR_INDEX")
+    VCURSOR_NEXT=$(printf ',"cursor":{"block":%d,"logIndex":%d}' "$CUR_BLOCK" "$CUR_INDEX")
+    START=$CUR_BLOCK
   else
     START=$((PAGE_LAST + 1))
+    CURSOR=""
+    VCURSOR_NEXT=""
   fi
   PAGE=$((PAGE + 1))
 done
-jq 'unique_by([.blockNumber, .logIndex])' "$OUT/pages.json" > "$OUT/pages.tmp" && mv "$OUT/pages.tmp" "$OUT/pages.json"
 cp "$OUT/page0.json" "$OUT/result.json"
 SMALL_TO=$((FROM + 40))
 PURETH_PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"}' "$TRANSFER" "$FROM" "$SMALL_TO")

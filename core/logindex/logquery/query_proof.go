@@ -309,6 +309,9 @@ func (p *QueryProof) checkQuery(req FilterQuery, refNumber uint64) error {
 	if p.Query.Limit != req.Limit || p.Query.LimitLatest != req.LimitLatest {
 		return errors.New("proof answers a different limit")
 	}
+	if (p.Query.Cursor == nil) != (req.Cursor == nil) || p.Query.Cursor != nil && *p.Query.Cursor != *req.Cursor {
+		return errors.New("proof answers a different cursor")
+	}
 	if req.Limit == 0 {
 		return errors.New("zero result limit")
 	}
@@ -494,7 +497,10 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, rangeFirst, rangeLast uin
 		// a candidate derived through an offset matcher can lie beyond the
 		// receipt's last log; a log that does not exist is never a result
 		if int(pos.LogIndex) < len(logs) && query.Pattern.matchLogs(logs, int(pos.LogIndex)) {
-			res.logs = append(res.logs, logs[pos.LogIndex])
+			log := logs[pos.LogIndex]
+			if !query.Cursor.excludes(log.BlockNumber, uint64(log.Index), query.LimitLatest) {
+				res.logs = append(res.logs, log)
+			}
 		}
 	}
 	if uint64(len(res.logs)) != tqp.ResultCount {

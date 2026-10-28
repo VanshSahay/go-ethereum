@@ -273,3 +273,81 @@ func TestBroadQueryWithSmallLimit(t *testing.T) {
 		t.Error("an unlimited broad query was served past the candidate cap")
 	}
 }
+
+// TestCursorPagination pages through results with a small limit, resuming each
+// page at the cursor of the previous one: every page verifies, no log is
+// repeated or skipped, and the pages add up to the unlimited result, in both
+// scan directions and across all patterns.
+func TestCursorPagination(t *testing.T) {
+	rtc := newRTChainWith(t, 40, diffEmitterCode(), func(block int) int { return block%3 + 1 })
+	emitter := crypto.CreateAddress(rtSender, 1)
+	trusted := rtc.bc.CurrentBlock()
+	opts := DefaultVerifyOptions(rtc.bc.Config())
+	last := trusted.Number.Uint64()
+
+	for _, dp := range diffPatterns {
+		pattern, err := NewPatternMatcherFromJSON(json.RawMessage(dp.json(emitter)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := expectedMatches(rtc, dp, 1, last)
+		for _, latest := range []bool{false, true} {
+			for _, limit := range []uint64{1, 3, 7} {
+				name := fmt.Sprintf("%s limit %d latest %v", dp.name, limit, latest)
+				var (
+					pages  [][]*types.Log
+					first  = uint64(1)
+					lastB  = last
+					cursor *Cursor
+				)
+				for page := 0; ; page++ {
+					if page > len(want)+2 {
+						t.Fatalf("%s: pagination does not terminate", name)
+					}
+					req := FilterQuery{Pattern: pattern, FirstBlock: first, LastBlock: lastB, Limit: limit, LimitLatest: latest, Cursor: cursor}
+					served, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
+					if err != nil {
+						t.Fatalf("%s page %d: %v", name, page, err)
+					}
+					blob, err := json.Marshal(proof)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var decoded QueryProof
+					if err := json.Unmarshal(blob, &decoded); err != nil {
+						t.Fatalf("%s page %d: %v", name, page, err)
+					}
+					res, err := decoded.Verify(trusted, req, opts)
+					if err != nil {
+						t.Fatalf("%s page %d: verify: %v", name, page, err)
+					}
+					if len(res.Logs) != len(served) {
+						t.Fatalf("%s page %d: verified %d logs, served %d", name, page, len(res.Logs), len(served))
+					}
+					pages = append(pages, res.Logs)
+					if uint64(len(res.Logs)) < limit {
+						break
+					}
+					if latest {
+						oldest := res.Logs[0]
+						lastB, cursor = oldest.BlockNumber, &Cursor{Block: oldest.BlockNumber, LogIndex: uint64(oldest.Index)}
+					} else {
+						newest := res.Logs[len(res.Logs)-1]
+						first, cursor = newest.BlockNumber, &Cursor{Block: newest.BlockNumber, LogIndex: uint64(newest.Index)}
+					}
+				}
+				var all []*types.Log
+				if latest {
+					for i := len(pages) - 1; i >= 0; i-- {
+						all = append(all, pages[i]...)
+					}
+				} else {
+					for _, p := range pages {
+						all = append(all, p...)
+					}
+				}
+				checkLogs(t, name, all, want)
+			}
+		}
+	}
+}

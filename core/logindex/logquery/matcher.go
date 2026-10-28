@@ -40,6 +40,28 @@ type FilterQuery struct {
 	LastBlock   uint64         `json:"lastBlock"`
 	Limit       uint64         `json:"limit"`
 	LimitLatest bool           `json:"limitLatest"`
+
+	// Cursor resumes a cut result: logs up to and including the cursor in scan
+	// order (oldest first, or newest first with LimitLatest) are excluded.
+	Cursor *Cursor `json:"cursor,omitempty"`
+}
+
+// Cursor is the position of a log: its block and its block-global log index.
+type Cursor struct {
+	Block    uint64 `json:"block"`
+	LogIndex uint64 `json:"logIndex"`
+}
+
+// excludes tells whether the log at the position lies at or before the cursor
+// in scan order and is therefore not part of the result.
+func (c *Cursor) excludes(block, logIndex uint64, reverse bool) bool {
+	if c == nil {
+		return false
+	}
+	if reverse {
+		return block > c.Block || block == c.Block && logIndex >= c.LogIndex
+	}
+	return block < c.Block || block == c.Block && logIndex <= c.LogIndex
 }
 
 // MarshalJSON encodes the query with the pattern's own marshaling.
@@ -54,7 +76,8 @@ func (q FilterQuery) MarshalJSON() ([]byte, error) {
 		LastBlock   uint64          `json:"lastBlock"`
 		Limit       uint64          `json:"limit"`
 		LimitLatest bool            `json:"limitLatest"`
-	}{pattern, q.FirstBlock, q.LastBlock, q.Limit, q.LimitLatest})
+		Cursor      *Cursor         `json:"cursor,omitempty"`
+	}{pattern, q.FirstBlock, q.LastBlock, q.Limit, q.LimitLatest, q.Cursor})
 }
 
 // UnmarshalJSON decodes the query, reconstructing the pattern from its JSON
@@ -66,6 +89,7 @@ func (q *FilterQuery) UnmarshalJSON(data []byte) error {
 		LastBlock   uint64          `json:"lastBlock"`
 		Limit       uint64          `json:"limit"`
 		LimitLatest bool            `json:"limitLatest"`
+		Cursor      *Cursor         `json:"cursor"`
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
@@ -74,7 +98,7 @@ func (q *FilterQuery) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	q.Pattern, q.FirstBlock, q.LastBlock, q.Limit, q.LimitLatest = matcher, p.FirstBlock, p.LastBlock, p.Limit, p.LimitLatest
+	q.Pattern, q.FirstBlock, q.LastBlock, q.Limit, q.LimitLatest, q.Cursor = matcher, p.FirstBlock, p.LastBlock, p.Limit, p.LimitLatest, p.Cursor
 	return nil
 }
 
@@ -195,6 +219,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 			prover:      prover,
 			pattern:     query.Pattern,
 			reverse:     query.LimitLatest,
+			cursor:      query.Cursor,
 			maxRun:      mc.MaxCandidates,
 			window:      mc.ScanWindow,
 			blockProofs: make(map[uint64]*blockProof),
@@ -374,6 +399,7 @@ type matcherProcess struct {
 	prover    *tableProver
 	pattern   PatternMatcher
 	reverse   bool
+	cursor    *Cursor
 	maxRun    int
 	window    uint64 // blocks in the first scan window, zero for the default
 
@@ -618,6 +644,9 @@ func (mp *matcherProcess) processCandidate(pos types.IndexPosition) (bool, error
 // recordMatch appends the log at the position to the matches if it matches.
 func (mp *matcherProcess) recordMatch(pos types.IndexPosition, receipt *types.Receipt) bool {
 	if !mp.pattern.matchLogs(receipt.Logs, int(pos.LogIndex)) {
+		return false
+	}
+	if mp.cursor.excludes(pos.BlockNumber, uint64(mp.curLogsOffsets[pos.TxIndex])+uint64(pos.LogIndex), mp.reverse) {
 		return false
 	}
 	log := receipt.Logs[pos.LogIndex]

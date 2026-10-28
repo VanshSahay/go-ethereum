@@ -58,26 +58,39 @@ type PurethQueryArgs struct {
 	LastBlock     *hexutil.Uint64        `json:"lastBlock"`
 	Limit         *hexutil.Uint64        `json:"limit"`
 	LimitLatest   bool                   `json:"limitLatest"`
+	// Cursor resumes a cut result: the logs up to and including it, in scan
+	// order, are skipped. Use the nextCursor of the previous result together
+	// with its block as firstBlock (lastBlock with limitLatest).
+	Cursor *PurethCursor `json:"cursor"`
 	// Encoding selects the proof encoding: "json" (default) or "rlp", the
 	// compact binary form returned as proofRlp.
 	Encoding string `json:"encoding"`
+}
+
+// PurethCursor is the position of a log: its block and its block-global index.
+type PurethCursor struct {
+	Block    hexutil.Uint64 `json:"block"`
+	LogIndex hexutil.Uint64 `json:"logIndex"`
 }
 
 // PurethQueryResult is the query result with its proof: the matching logs,
 // the block range they span and the self-contained proof that verifies them
 // without trusting the serving node.
 type PurethQueryResult struct {
-	Logs       []*types.Log         `json:"logs"`
-	FirstBlock hexutil.Uint64       `json:"firstBlock"`
-	LastBlock  hexutil.Uint64       `json:"lastBlock"`
+	Logs       []*types.Log   `json:"logs"`
+	FirstBlock hexutil.Uint64 `json:"firstBlock"`
+	LastBlock  hexutil.Uint64 `json:"lastBlock"`
+	// NextCursor is set when the result was cut at the limit: it is the last
+	// returned log in scan order, and the next page is requested with it as
+	// cursor, starting at its block.
+	NextCursor *PurethCursor        `json:"nextCursor,omitempty"`
 	Proof      *logquery.QueryProof `json:"proof,omitempty"`
 	ProofRLP   hexutil.Bytes        `json:"proofRlp,omitempty"`
 }
 
 // maxPurethLogs is the most logs a single proven query returns. A cut result
-// is trimmed to the limit and its proven range ends at the block of its last
-// log (lastBlock), which may be only partly included: the next page starts at
-// that block again.
+// is trimmed to the limit and carries a nextCursor: the next page starts at the
+// block of the cursor and skips everything up to it.
 const maxPurethLogs = 10_000
 
 // PurethAPI exposes the trustless log index queries.
@@ -138,6 +151,9 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 		Limit:       maxPurethLogs,
 		LimitLatest: args.LimitLatest,
 	}
+	if args.Cursor != nil {
+		query.Cursor = &logquery.Cursor{Block: uint64(args.Cursor.Block), LogIndex: uint64(args.Cursor.LogIndex)}
+	}
 	if args.FirstBlock != nil {
 		query.FirstBlock = uint64(*args.FirstBlock)
 	}
@@ -151,7 +167,7 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 		return nil, errors.New("limit must be positive")
 	}
 	if query.Limit > maxPurethLogs {
-		return nil, fmt.Errorf("limit %d exceeds the maximum of %d; page through the range starting each page at the returned lastBlock", query.Limit, maxPurethLogs)
+		return nil, fmt.Errorf("limit %d exceeds the maximum of %d; page through the range with the returned nextCursor", query.Limit, maxPurethLogs)
 	}
 	if query.FirstBlock == 0 {
 		return nil, errors.New("firstBlock must be at least 1")
@@ -173,6 +189,13 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 		Logs:       logs,
 		FirstBlock: hexutil.Uint64(resultRange.First()),
 		LastBlock:  hexutil.Uint64(resultRange.Last()),
+	}
+	if uint64(len(logs)) >= query.Limit && len(logs) > 0 {
+		edge := logs[len(logs)-1] // the newest log ends a forward page
+		if query.LimitLatest {
+			edge = logs[0] // the oldest log ends a reverse page
+		}
+		result.NextCursor = &PurethCursor{Block: hexutil.Uint64(edge.BlockNumber), LogIndex: hexutil.Uint64(edge.Index)}
 	}
 	if args.Encoding == "rlp" {
 		if result.ProofRLP, err = rlp.EncodeToBytes(proof); err != nil {

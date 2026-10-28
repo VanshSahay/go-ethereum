@@ -314,3 +314,67 @@ func TestPurethTableRoots(t *testing.T) {
 		t.Error("empty size list accepted")
 	}
 }
+
+// TestPurethCursorPaging pages through the results with a small limit using
+// the returned cursor: the pages add up to the unpaged result without
+// duplicates, every page proof verifies, and a replayed cursor is bound to the
+// request.
+func TestPurethCursorPaging(t *testing.T) {
+	bc, backend, emitterAddr := newAPIChain(t, 40, false)
+	api := ethapi.NewPurethAPI(backend)
+	ctx := context.Background()
+
+	full, err := api.GetLogsWithProofV1(ctx, ethapi.PurethQueryArgs{Address: &emitterAddr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.NextCursor != nil || len(full.Logs) < 10 {
+		t.Fatalf("unexpected unpaged result: %d logs, cursor %v", len(full.Logs), full.NextCursor)
+	}
+	pattern, err := logquery.NewLegacyMatcher([]common.Address{emitterAddr}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := bc.CurrentBlock()
+	opts := logquery.DefaultVerifyOptions(bc.Config())
+
+	const limit = 4
+	var (
+		got    []*types.Log
+		first  = hexutil.Uint64(1)
+		lim    = hexutil.Uint64(limit)
+		cursor *ethapi.PurethCursor
+	)
+	for page := 0; page < len(full.Logs); page++ {
+		res, err := api.GetLogsWithProofV1(ctx, ethapi.PurethQueryArgs{Address: &emitterAddr, FirstBlock: &first, Limit: &lim, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("page %d: %v", page, err)
+		}
+		req := logquery.FilterQuery{Pattern: pattern, FirstBlock: uint64(first), LastBlock: trusted.Number.Uint64(), Limit: limit}
+		if cursor != nil {
+			req.Cursor = &logquery.Cursor{Block: uint64(cursor.Block), LogIndex: uint64(cursor.LogIndex)}
+		}
+		if _, err := res.Proof.Verify(trusted, req, opts); err != nil {
+			t.Fatalf("page %d: verify: %v", page, err)
+		}
+		// the same proof does not answer a request with another cursor
+		other := req
+		other.Cursor = &logquery.Cursor{Block: 1, LogIndex: 0}
+		if _, err := res.Proof.Verify(trusted, other, opts); err == nil {
+			t.Fatalf("page %d: proof verified against another cursor", page)
+		}
+		got = append(got, res.Logs...)
+		if res.NextCursor == nil {
+			break
+		}
+		cursor, first = res.NextCursor, res.NextCursor.Block
+	}
+	if len(got) != len(full.Logs) {
+		t.Fatalf("pages hold %d logs, the unpaged result %d", len(got), len(full.Logs))
+	}
+	for i := range got {
+		if got[i].BlockNumber != full.Logs[i].BlockNumber || got[i].Index != full.Logs[i].Index {
+			t.Fatalf("log %d is block %d index %d, want block %d index %d", i, got[i].BlockNumber, got[i].Index, full.Logs[i].BlockNumber, full.Logs[i].Index)
+		}
+	}
+}
