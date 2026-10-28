@@ -130,6 +130,30 @@ for IDX in 0 40 90; do
 done
 
 echo
+echo "== adversarial prover (every rewritten proof must be rejected) =="
+PROXY="$OUT/evilproxy"
+( cd "$REPO" && go build -o "$PROXY" ./devnet/eip8304/cmd/evilproxy )
+PROXY_PORT=18545
+for MODE in none drop-block forge-contract bad-ref truncate-range flip-hash; do
+  "$PROXY" -upstream "$RPC" -listen "127.0.0.1:$PROXY_PORT" -mode "$MODE" > "$OUT/proxy-$MODE.log" 2>&1 &
+  PROXY_PID=$!
+  sleep 1
+  cast rpc --rpc-url "http://127.0.0.1:$PROXY_PORT" pureth_getLogsWithProofV1 "$PURETH_PARAMS" | jq '.proof' > "$OUT/proof-$MODE.json"
+  kill "$PROXY_PID" 2>/dev/null || true
+  wait "$PROXY_PID" 2>/dev/null || true
+  if [ "$MODE" = "none" ]; then
+    echo "--- $MODE (the honest proof through the proxy must verify)"
+    verify_proof "$OUT/proof-$MODE.json" "$TRANSFER"
+  else
+    echo "--- $MODE"
+    if verify_proof "$OUT/proof-$MODE.json" "$TRANSFER"; then
+      echo "ADVERSARY DEMO FAILED: $MODE proof verified" >&2
+      exit 1
+    fi
+  fi
+done
+
+echo
 echo "== absence proof (querying a log that never happened) =="
 DEAD=0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 ABSENT_PARAMS=$(printf '{"topics":[["%s"]],"firstBlock":"0x%x","lastBlock":"0x%x"}' "$DEAD" "$FROM" "$TO")
