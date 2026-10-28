@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -248,3 +249,37 @@ func TestPurethQueryRejects(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// TestPurethRLPEncoding pins the binary proof encoding option: the proof is
+// returned as proofRlp only, decodes, and verifies like the JSON form.
+func TestPurethRLPEncoding(t *testing.T) {
+	bc, backend, emitterAddr := newAPIChain(t, 40, false)
+	api := ethapi.NewPurethAPI(backend)
+
+	result, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{Address: &emitterAddr, Encoding: "rlp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Proof != nil || len(result.ProofRLP) == 0 {
+		t.Fatalf("expected only proofRlp, got proof=%v rlp=%d bytes", result.Proof != nil, len(result.ProofRLP))
+	}
+	var decoded logquery.QueryProof
+	if err := rlp.DecodeBytes(result.ProofRLP, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	pattern, err := logquery.NewLegacyMatcher([]common.Address{emitterAddr}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := bc.CurrentBlock()
+	res, err := decoded.Verify(trusted, logquery.FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: trusted.Number.Uint64(), Limit: math.MaxUint64}, logquery.DefaultVerifyOptions(bc.Config()))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if len(res.Logs) != len(result.Logs) {
+		t.Errorf("verified %d logs, served %d", len(res.Logs), len(result.Logs))
+	}
+	if _, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{Address: &emitterAddr, Encoding: "xml"}); err == nil {
+		t.Error("unknown encoding accepted")
+	}
+}

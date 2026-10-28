@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -56,6 +57,9 @@ type PurethQueryArgs struct {
 	LastBlock     *hexutil.Uint64        `json:"lastBlock"`
 	Limit         *hexutil.Uint64        `json:"limit"`
 	LimitLatest   bool                   `json:"limitLatest"`
+	// Encoding selects the proof encoding: "json" (default) or "rlp", the
+	// compact binary form returned as proofRlp.
+	Encoding string `json:"encoding"`
 }
 
 // PurethQueryResult is the query result with its proof: the matching logs,
@@ -65,7 +69,8 @@ type PurethQueryResult struct {
 	Logs       []*types.Log         `json:"logs"`
 	FirstBlock hexutil.Uint64       `json:"firstBlock"`
 	LastBlock  hexutil.Uint64       `json:"lastBlock"`
-	Proof      *logquery.QueryProof `json:"proof"`
+	Proof      *logquery.QueryProof `json:"proof,omitempty"`
+	ProofRLP   hexutil.Bytes        `json:"proofRlp,omitempty"`
 }
 
 // PurethAPI exposes the trustless log index queries.
@@ -85,6 +90,9 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 	matcher := api.backend.LogIndexMatcher()
 	if matcher == nil {
 		return nil, errors.New("log index is not enabled")
+	}
+	if args.Encoding != "" && args.Encoding != "json" && args.Encoding != "rlp" {
+		return nil, fmt.Errorf("unknown proof encoding %q", args.Encoding)
 	}
 	if args.RefBlock != nil && args.ReferenceHead != nil {
 		return nil, errors.New("refBlock and referenceHead are aliases, specify only one")
@@ -151,12 +159,19 @@ func (api *PurethAPI) GetLogsWithProofV1(ctx context.Context, args PurethQueryAr
 	if resultRange.IsEmpty() {
 		return nil, errors.New("no block range could be proven")
 	}
-	return &PurethQueryResult{
+	result := &PurethQueryResult{
 		Logs:       logs,
 		FirstBlock: hexutil.Uint64(resultRange.First()),
 		LastBlock:  hexutil.Uint64(resultRange.Last()),
-		Proof:      proof,
-	}, nil
+	}
+	if args.Encoding == "rlp" {
+		if result.ProofRLP, err = rlp.EncodeToBytes(proof); err != nil {
+			return nil, err
+		}
+	} else {
+		result.Proof = proof
+	}
+	return result, nil
 }
 
 // refHeader resolves the canonical reference head the proof is anchored to.

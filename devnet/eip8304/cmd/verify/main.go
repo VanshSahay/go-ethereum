@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // networkConfig resolves the chain config the index contract's get() executes
@@ -68,18 +69,14 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	var tamperIdx = -1
 	if len(args) == 3 && args[1] == "tamper" {
-		var idx int
-		if _, err := fmt.Sscanf(args[2], "%d", &idx); err != nil {
-			fatal(err)
-		}
-		raw, err = tamper(raw, idx)
-		if err != nil {
+		if _, err := fmt.Sscanf(args[2], "%d", &tamperIdx); err != nil {
 			fatal(err)
 		}
 	}
-	var proof logquery.QueryProof
-	if err := json.Unmarshal(raw, &proof); err != nil {
+	proof, err := loadProof(raw, tamperIdx)
+	if err != nil {
 		fatal(err)
 	}
 	// the header embedded in the proof is only used once its hash matches the
@@ -105,6 +102,65 @@ func main() {
 		}
 		fmt.Printf("  block #%d tx %s index %d addr %s\n", l.BlockNumber, l.TxHash.Hex()[:18]+"…", l.Index, l.Address.Hex()[:12]+"…")
 	}
+}
+
+// loadProof reads a proof in any of its forms: a JSON proof document (bare or
+// wrapped in an RPC result with a "proof" member), an RPC result carrying the
+// binary form in "proofRlp", or a bare hex string of the RLP encoding. A
+// non-negative tamperIdx corrupts the proof material before decoding.
+func loadProof(raw []byte, tamperIdx int) (*logquery.QueryProof, error) {
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	var binary []byte
+	if strings.HasPrefix(text, "0x") {
+		b, err := hex.DecodeString(text[2:])
+		if err != nil {
+			return nil, err
+		}
+		binary = b
+	} else {
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return nil, err
+		}
+		if blob, ok := doc["proofRlp"]; ok {
+			var s string
+			if err := json.Unmarshal(blob, &s); err != nil {
+				return nil, err
+			}
+			b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+			if err != nil {
+				return nil, err
+			}
+			binary = b
+		}
+	}
+	var proof logquery.QueryProof
+	if binary != nil {
+		if tamperIdx >= 0 {
+			binary[tamperIdx%len(binary)] ^= 0xff
+			fmt.Printf("tampering: byte %d of the binary proof\n", tamperIdx%len(binary))
+		}
+		if err := rlp.DecodeBytes(binary, &proof); err != nil {
+			return nil, err
+		}
+		return &proof, nil
+	}
+	if tamperIdx >= 0 {
+		var err error
+		if raw, err = tamper(raw, tamperIdx); err != nil {
+			return nil, err
+		}
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err == nil {
+		if blob, ok := doc["proof"]; ok {
+			raw = blob
+		}
+	}
+	if err := json.Unmarshal(raw, &proof); err != nil {
+		return nil, err
+	}
+	return &proof, nil
 }
 
 // tamper flips one byte of the hex string at the given index of the proof
