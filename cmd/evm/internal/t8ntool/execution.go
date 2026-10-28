@@ -19,6 +19,7 @@ package t8ntool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	stdmath "math"
 	"math/big"
@@ -365,7 +366,11 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, 
 	}
 	// EIP-8304: the level-0 index table root commits to the parent block
 	// hash, which the transition tool environment does not carry; computing
-	// it needs an env schema extension, so t8n passes no tables for now.
+	// it needs an env schema extension, so t8n cannot run blocks on which the
+	// fork is active: failing is better than committing a wrong state root.
+	if chainConfig.IsEIP8304(vmContext.BlockNumber, vmContext.Time) {
+		return nil, nil, nil, NewError(ErrorEVM, errors.New("EIP-8304 index table roots are not supported by the transition tool"))
+	}
 	requests, bal, err := core.PostExecution(context.Background(), chainConfig, vmContext.BlockNumber, vmContext.Time, allLogs, nil, evm, uint32(len(receipts)+1))
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("failed to process post-execution: %v", err))
