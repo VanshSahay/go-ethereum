@@ -221,7 +221,43 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 			}
 		}
 	}
+	allLogs, err := p.applyLimit(allLogs, req, refNumber)
+	if err != nil {
+		return nil, err
+	}
 	return &Result{Logs: allLogs, FirstBlock: p.Query.FirstBlock, LastBlock: p.Query.LastBlock}, nil
+}
+
+// applyLimit enforces the result limit semantics on the verified logs, which
+// are in ascending position order:
+//
+//   - fewer logs than the limit: the result is complete only if the proof
+//     covers the whole requested range, so a prover cannot answer a narrower
+//     range without having reached the limit;
+//   - the limit is reached: exactly the oldest (or, with LimitLatest, the
+//     newest) limit logs are returned and the proven range ends at the block
+//     of the last returned log. The proof covers that whole block, so the
+//     logs beyond the limit that share it are dropped here.
+func (p *QueryProof) applyLimit(logs []*types.Log, req FilterQuery, refNumber uint64) ([]*types.Log, error) {
+	reqLast := min(req.LastBlock, refNumber)
+	if uint64(len(logs)) < req.Limit {
+		if p.Query.FirstBlock != req.FirstBlock || p.Query.LastBlock != reqLast {
+			return nil, errors.New("proof covers less than the requested range without reaching the result limit")
+		}
+		return logs, nil
+	}
+	if req.LimitLatest {
+		logs = logs[uint64(len(logs))-req.Limit:]
+		if p.Query.FirstBlock != logs[0].BlockNumber || p.Query.LastBlock != reqLast {
+			return nil, errors.New("proven range does not end at the block of the last returned log")
+		}
+		return logs, nil
+	}
+	logs = logs[:req.Limit]
+	if p.Query.FirstBlock != req.FirstBlock || p.Query.LastBlock != logs[len(logs)-1].BlockNumber {
+		return nil, errors.New("proven range does not end at the block of the last returned log")
+	}
+	return logs, nil
 }
 
 // checkQuery binds the proof to the query the caller asked for: the pattern,

@@ -24,7 +24,7 @@ func TestMidRangeQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := func(name string, lastBlock, limit uint64, latest bool, exact bool) {
+	run := func(name string, lastBlock, limit uint64, latest bool) {
 		t.Helper()
 		req := FilterQuery{
 			Pattern:     matcher,
@@ -33,7 +33,7 @@ func TestMidRangeQuery(t *testing.T) {
 			Limit:       limit,
 			LimitLatest: latest,
 		}
-		logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, req, true)
+		logs, proven, proof, err := rtc.matcher.GetMatches(context.Background(), v, req, true)
 		if err != nil {
 			t.Fatalf("%s: get matches: %v", name, err)
 		}
@@ -49,18 +49,30 @@ func TestMidRangeQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: verify: %v", name, err)
 		}
-		verified := res.Logs
-		if exact && len(verified) != len(logs) {
-			t.Fatalf("%s: verified %d logs, want %d", name, len(verified), len(logs))
+		if len(res.Logs) != len(logs) {
+			t.Fatalf("%s: verified %d logs, want %d", name, len(res.Logs), len(logs))
 		}
-		if !exact && len(verified) < len(logs) {
-			t.Fatalf("%s: verified %d logs, want at least %d", name, len(verified), len(logs))
+		for i := range logs {
+			if res.Logs[i].BlockNumber != logs[i].BlockNumber || res.Logs[i].Index != logs[i].Index || res.Logs[i].TxHash != logs[i].TxHash {
+				t.Fatalf("%s: verified log %d differs from the served one", name, i)
+			}
 		}
+		if res.FirstBlock != proven.First() || res.LastBlock != proven.Last() {
+			t.Fatalf("%s: verified range %d..%d, served %d..%d", name, res.FirstBlock, res.LastBlock, proven.First(), proven.Last())
+		}
+		if limit < rtMaxUint64 && uint64(len(res.Logs)) != limit {
+			t.Fatalf("%s: %d logs under limit %d", name, len(res.Logs), limit)
+		}
+		t.Logf("%s: %d logs, proven range %d..%d", name, len(res.Logs), res.FirstBlock, res.LastBlock)
 	}
-	run("mid-range", 25, rtMaxUint64, false, true)
-	run("ending at head", 40, rtMaxUint64, false, true)
-	run("mid-range limited", 25, 7, false, false)
-	run("mid-range latest", 25, 5, true, false)
+	run("mid-range", 25, rtMaxUint64, false)
+	run("ending at head", 40, rtMaxUint64, false)
+	run("mid-range limited", 25, 7, false)
+	run("mid-range latest", 25, 5, true)
+	run("limit cuts mid block", 25, 8, false) // 3 logs per block: the 8th log is in the middle of a block
+	run("latest limit cuts mid block", 25, 8, true)
+	run("limit of exactly one", 25, 1, false)
+	run("latest limit of exactly one", 25, 1, true)
 
 	// a query with no matches at all must still verify with zero results
 	absent, err := NewLegacyMatcher(nil, [][]common.Hash{{{0xde, 0xad}}})

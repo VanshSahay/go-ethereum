@@ -345,3 +345,80 @@ func TestAdversarialOmission(t *testing.T) {
 		tqp.BlockResults, tqp.ResultCount = nil, 0
 	})
 }
+
+// limitedFixture is like advFixture with a result limit that cuts the result
+// set in the middle of a block (three logs per block, limit 8).
+func newLimitedFixture(t *testing.T, latest bool) *advFixture {
+	t.Helper()
+	f := newAdvFixture(t)
+	f.req.Limit, f.req.LimitLatest = 8, latest
+	logs, _, proof, err := f.rtc.matcher.GetMatches(context.Background(), &rtView{f.rtc}, f.req, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.blob, err = json.Marshal(proof); err != nil {
+		t.Fatal(err)
+	}
+	f.logs = len(logs)
+	return f
+}
+
+// TestAdversarialRange pins that a prover cannot shrink the answered range
+// unless the result limit forces it to.
+func TestAdversarialRange(t *testing.T) {
+	// without a reached limit the whole requested range must be answered
+	f := newAdvFixture(t)
+	f.mustReject(t, "shrink the range without reaching the limit", func(p *QueryProof) {
+		const cut = 20
+		p.Query.LastBlock = cut
+		for i := range p.TableQueryProofs {
+			tqp := &p.TableQueryProofs[i]
+			kept := tqp.BlockResults[:0]
+			for _, br := range tqp.BlockResults {
+				if br.Header.Number.Uint64() <= cut {
+					kept = append(kept, br)
+				}
+			}
+			tqp.BlockResults, tqp.ResultCount = kept, uint64(3*len(kept)) // three logs per block
+		}
+	})
+	f.mustReject(t, "move the start of the range", func(p *QueryProof) {
+		p.Query.FirstBlock++
+	})
+
+	for _, latest := range []bool{false, true} {
+		name := map[bool]string{false: "oldest first", true: "latest first"}[latest]
+		fl := newLimitedFixture(t, latest)
+		res, err := fl.proof(t).Verify(fl.trusted, fl.req, fl.opts)
+		if err != nil {
+			t.Fatalf("%s: honest limited proof: %v", name, err)
+		}
+		if len(res.Logs) != 8 {
+			t.Fatalf("%s: %d logs, want exactly the limit of 8", name, len(res.Logs))
+		}
+		// the proven range ends at the block of the last returned log
+		if latest && res.FirstBlock != res.Logs[0].BlockNumber || !latest && res.LastBlock != res.Logs[7].BlockNumber {
+			t.Errorf("%s: proven range %d..%d does not end at the cut block", name, res.FirstBlock, res.LastBlock)
+		}
+		fl.mustReject(t, name+": extend the range past the cut", func(p *QueryProof) {
+			if latest {
+				p.Query.FirstBlock = fl.req.FirstBlock
+			} else {
+				p.Query.LastBlock = min(fl.req.LastBlock, fl.trusted.Number.Uint64())
+			}
+		})
+		fl.mustReject(t, name+": cut the range one block short", func(p *QueryProof) {
+			if latest {
+				p.Query.FirstBlock++
+			} else {
+				p.Query.LastBlock--
+			}
+		})
+		// a limited answer is only valid for the limit it was made for
+		other := fl.req
+		other.Limit = 9
+		if _, err := fl.proof(t).Verify(fl.trusted, other, fl.opts); err == nil {
+			t.Errorf("%s: proof for limit 8 verified for limit 9", name)
+		}
+	}
+}
