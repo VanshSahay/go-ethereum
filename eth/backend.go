@@ -255,6 +255,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			LogIndexHistoricContract: config.LogIndexHistoricContract,
 			LogIndexHistoricSizes:    config.LogIndexHistoricSizes,
 			LogIndexHistoricLast:     config.LogIndexHistoricLast,
+			LogIndexHistoricHeld:     config.LogIndexHistoricHeld,
 			TxLookupLimit:            int64(min(config.TransactionHistory, math.MaxInt64)),
 			VmConfig: vm.Config{
 				EnablePreimageRecording: config.EnablePreimageRecording,

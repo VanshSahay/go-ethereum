@@ -124,6 +124,7 @@ type Config struct {
 	LogIndexHistoricContract common.Address `toml:",omitempty"`
 	LogIndexHistoricSizes    []uint64       `toml:",omitempty"`
 	LogIndexHistoricLast     uint64         `toml:",omitempty"`
+	LogIndexHistoricHeld     []uint64       `toml:",omitempty"` // sizes the contract holds roots for (empty = all)
 	LogExportCheckpoints     string         // export log index checkpoints to file
 	StateHistory             uint64         `toml:",omitempty"` // The maximum number of blocks from head whose state histories are reserved.
 	TrienodeHistory          int64          `toml:",omitempty"` // Number of blocks from the chain head for which trienode histories are retained

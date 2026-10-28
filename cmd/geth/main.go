@@ -91,6 +91,7 @@ var (
 		utils.LogIndexHistoryFlag,
 		utils.LogIndexHistoricContractFlag,
 		utils.LogIndexHistoricSizesFlag,
+		utils.LogIndexHistoricHeldFlag,
 		utils.LogIndexHistoricLastFlag,
 		utils.LogExportCheckpointsFlag,
 		utils.StateHistoryFlag,

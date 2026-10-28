@@ -34,6 +34,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		LogIndexHistoricContract common.Address `toml:",omitempty"`
 		LogIndexHistoricSizes    []uint64       `toml:",omitempty"`
 		LogIndexHistoricLast     uint64         `toml:",omitempty"`
+		LogIndexHistoricHeld     []uint64       `toml:",omitempty"`
 		LogExportCheckpoints     string
 		StateHistory             uint64                 `toml:",omitempty"`
 		TrienodeHistory          int64                  `toml:",omitempty"`
@@ -96,6 +97,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.LogIndexHistoricContract = c.LogIndexHistoricContract
 	enc.LogIndexHistoricSizes = c.LogIndexHistoricSizes
 	enc.LogIndexHistoricLast = c.LogIndexHistoricLast
+	enc.LogIndexHistoricHeld = c.LogIndexHistoricHeld
 	enc.LogExportCheckpoints = c.LogExportCheckpoints
 	enc.StateHistory = c.StateHistory
 	enc.TrienodeHistory = c.TrienodeHistory
@@ -162,6 +164,7 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		LogIndexHistoricContract *common.Address `toml:",omitempty"`
 		LogIndexHistoricSizes    []uint64        `toml:",omitempty"`
 		LogIndexHistoricLast     *uint64         `toml:",omitempty"`
+		LogIndexHistoricHeld     []uint64        `toml:",omitempty"`
 		LogExportCheckpoints     *string
 		StateHistory             *uint64                `toml:",omitempty"`
 		TrienodeHistory          *int64                 `toml:",omitempty"`
@@ -260,6 +263,9 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.LogIndexHistoricLast != nil {
 		c.LogIndexHistoricLast = *dec.LogIndexHistoricLast
+	}
+	if dec.LogIndexHistoricHeld != nil {
+		c.LogIndexHistoricHeld = dec.LogIndexHistoricHeld
 	}
 	if dec.LogExportCheckpoints != nil {
 		c.LogExportCheckpoints = *dec.LogExportCheckpoints

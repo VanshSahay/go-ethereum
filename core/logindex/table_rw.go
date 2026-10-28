@@ -20,8 +20,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math/bits"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
@@ -50,7 +52,8 @@ type Params struct {
 	// given address that is not fed by the protocol's publication schedule
 	historic      bool
 	indexContract common.Address
-	historicLast  uint64 // the last block the contract holds roots for
+	historicLast  uint64   // the last block the contract holds roots for
+	historicHeld  []uint64 // sizes the contract holds roots for, nil for all of them
 }
 
 // NewHistoricParams returns the parameters of an out-of-protocol hierarchy:
@@ -74,6 +77,39 @@ func NewHistoricParams(sizes []uint64, contract common.Address, lastBlock uint64
 		indexContract:              contract,
 		historicLast:               lastBlock,
 	}, nil
+}
+
+// WithHeldSizes restricts the table sizes of a historic hierarchy that the
+// contract holds roots for: the index still builds every level (the larger
+// tables are merged from the smaller ones), but only tables of the held sizes
+// are served, so a contract that stores just the top levels (a few hundred
+// roots instead of one per block) is enough. The queried range is then served
+// by the held tables overlapping it, which may extend past its ends.
+func (p *Params) WithHeldSizes(held []uint64) (*Params, error) {
+	if !p.historic {
+		return nil, errors.New("held sizes only apply to a historic hierarchy")
+	}
+	for _, size := range held {
+		found := false
+		for _, level := range p.tableLevels {
+			found = found || level.blockCount == size
+		}
+		if !found {
+			return nil, fmt.Errorf("held table size %d is not a size of the hierarchy", size)
+		}
+	}
+	p.historicHeld = held
+	return p, nil
+}
+
+// holdsLevel reports whether tables of the given level can be served: always
+// outside historic mode, and in historic mode when the contract holds their
+// roots.
+func (p *Params) holdsLevel(level int) bool {
+	if !p.historic || p.historicHeld == nil {
+		return true
+	}
+	return slices.Contains(p.historicHeld, p.tableLevels[level].blockCount)
 }
 
 // Historic reports whether the hierarchy is out-of-protocol.

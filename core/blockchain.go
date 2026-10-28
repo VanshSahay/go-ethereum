@@ -209,7 +209,8 @@ type BlockChainConfig struct {
 	// at LogIndexHistoricContract instead of the protocol's contract.
 	LogIndexHistoricContract common.Address
 	LogIndexHistoricSizes    []uint64
-	LogIndexHistoricLast     uint64 // the last block the contract holds roots for
+	LogIndexHistoricLast     uint64   // the last block the contract holds roots for
+	LogIndexHistoricHeld     []uint64 // table sizes the contract holds roots for (empty = all of LogIndexHistoricSizes)
 
 	// State snapshot related options
 	SnapshotLimit   int  // Memory allowance (MB) to use for caching snapshot entries in memory
@@ -464,6 +465,11 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		if len(cfg.LogIndexHistoricSizes) > 0 {
 			if indexParams, err = logindex.NewHistoricParams(cfg.LogIndexHistoricSizes, cfg.LogIndexHistoricContract, cfg.LogIndexHistoricLast); err != nil {
 				return nil, err
+			}
+			if len(cfg.LogIndexHistoricHeld) > 0 {
+				if indexParams, err = indexParams.WithHeldSizes(cfg.LogIndexHistoricHeld); err != nil {
+					return nil, err
+				}
 			}
 		}
 		if cfg.LogIndexPath != "" {

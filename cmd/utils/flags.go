@@ -375,6 +375,11 @@ var (
 		Usage:    "Comma separated table sizes of the historic index contract, starting at 1 (for example 1,4,16,64,256)",
 		Category: flags.StateCategory,
 	}
+	LogIndexHistoricHeldFlag = &cli.StringFlag{
+		Name:     "logindex.historic.held",
+		Usage:    "Comma separated subset of the historic table sizes the contract holds roots for (default all); a contract with only the top levels is a few hundred roots instead of one per block",
+		Category: flags.StateCategory,
+	}
 	LogIndexHistoricLastFlag = &cli.Uint64Flag{
 		Name:     "logindex.historic.last",
 		Usage:    "Last block the historic index contract holds table roots for",
@@ -1928,6 +1933,17 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 			sizes = append(sizes, size)
 		}
 		cfg.LogIndexHistoricSizes = sizes
+	}
+	if ctx.IsSet(LogIndexHistoricHeldFlag.Name) {
+		var held []uint64
+		for _, field := range strings.Split(ctx.String(LogIndexHistoricHeldFlag.Name), ",") {
+			size, err := strconv.ParseUint(strings.TrimSpace(field), 10, 64)
+			if err != nil {
+				Fatalf("Invalid held historic index table size %q: %v", field, err)
+			}
+			held = append(held, size)
+		}
+		cfg.LogIndexHistoricHeld = held
 	}
 	if ctx.IsSet(LogIndexHistoricLastFlag.Name) {
 		cfg.LogIndexHistoricLast = ctx.Uint64(LogIndexHistoricLastFlag.Name)

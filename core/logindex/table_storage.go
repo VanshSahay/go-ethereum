@@ -189,6 +189,9 @@ func (ts *tableStorage) getRangeReaders(blockRange common.Range[uint64], publish
 	var readers []*TableReader
 	rs := common.SingleRangeSet[uint64](blockRange)
 	for level := len(ts.params.tableLevels) - 1; level >= 0; level-- {
+		if !ts.params.holdsLevel(level) {
+			continue
+		}
 		avail := ts.complete[level].Intersection(shiftRangeSetLevel(rs, ts.params.tableLevels[0], ts.params.tableLevels[level], true))
 		if ts.params.historic {
 			// only tables the contract holds a root for can be served

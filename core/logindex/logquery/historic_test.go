@@ -63,18 +63,28 @@ func TestHistoricContractEndToEnd(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		sizes     []uint64
+		held      []uint64 // sizes the contract stores roots for, nil for all
 		covered   uint64
 		wantRoots int
+		first     uint64 // the queried range: first block, and the last one relative to covered
+		lastBack  uint64
 	}{
-		{"1-4-16", []uint64{1, 4, 16}, 20, 24}, // 20 level-0 tables and the 4-block ones at 4, 8, 12, 16
-		{"1-4-16-64", []uint64{1, 4, 16, 64}, 140, 0},
-		{"1-8-64", []uint64{1, 8, 64}, 140, 0}, // a ratio other than four
+		{"1-4-16", []uint64{1, 4, 16}, nil, 20, 24, 1, 1}, // 20 level-0 tables and the 4-block ones at 4, 8, 12, 16
+		{"1-4-16-64", []uint64{1, 4, 16, 64}, nil, 140, 0, 1, 1},
+		{"1-8-64", []uint64{1, 8, 64}, nil, 140, 0, 1, 1}, // a ratio other than four
+		// a contract with only the top two levels: the roots of 16 and 64 block
+		// tables, not one per block. The range is served by the held tables
+		// overlapping it, so it starts at the first 16-block table and ends
+		// inside the last complete one
+		{"sparse-16-64", []uint64{1, 4, 16, 64}, []uint64{16, 64}, 200, 0, 16, 10},
 	} {
-		t.Run(tc.name, func(t *testing.T) { testHistoricContractEndToEnd(t, tc.sizes, tc.covered, tc.wantRoots) })
+		t.Run(tc.name, func(t *testing.T) {
+			testHistoricContractEndToEnd(t, tc.sizes, tc.held, tc.covered, tc.wantRoots, tc.first, tc.lastBack)
+		})
 	}
 }
 
-func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, wantRoots int) {
+func testHistoricContractEndToEnd(t *testing.T, sizes, held []uint64, covered uint64, wantRoots int, queryFirst, lastBack uint64) {
 	config := *params.MergedTestChainConfig
 	if config.EIP8304Time != nil {
 		t.Fatal("test config has EIP-8304 active")
@@ -102,15 +112,22 @@ func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, 
 		rawdb.WriteReceipts(genDB, b.Hash(), b.NumberU64(), preReceipts[i])
 		rawdb.WriteCanonicalHash(genDB, b.Hash(), b.NumberU64())
 	}
-	roots, err := logindex.ExportTableRoots(sliceChain{pre, preReceipts}, pre[covered-1].Header(), sizes)
+	exported := sizes
+	if held != nil {
+		exported = held
+	}
+	roots, err := logindex.ExportTableRoots(sliceChain{pre, preReceipts}, pre[covered-1].Header(), exported)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if wantRoots != 0 && len(roots) != wantRoots {
 		t.Fatalf("exported %d roots, want %d", len(roots), wantRoots)
 	}
-	if len(roots) < int(covered) {
+	if held == nil && len(roots) < int(covered) {
 		t.Fatalf("exported only %d roots for %d blocks", len(roots), covered)
+	}
+	if held != nil && len(roots) > 2*int(covered)/int(held[0]) {
+		t.Fatalf("a sparse contract should hold about one root per %d blocks, exported %d", held[0], len(roots))
 	}
 
 	// the contract goes in with a transaction in the block after them
@@ -130,6 +147,7 @@ func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, 
 	bc, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), genesis, engine, &core.BlockChainConfig{
 		LogIndexHistoricContract: historic,
 		LogIndexHistoricSizes:    sizes,
+		LogIndexHistoricHeld:     held,
 		LogIndexHistoricLast:     covered,
 	})
 	if err != nil {
@@ -145,7 +163,7 @@ func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, 
 	bc.SyncLogIndex()
 
 	matcher := NewMatcher(bc.LogIndex(), &rtBackend{bc: bc})
-	spec := HistoricContract{CodeHash: crypto.Keccak256Hash(HistoricContractCode), TableSizes: sizes, LastBlock: covered}
+	spec := HistoricContract{CodeHash: crypto.Keccak256Hash(HistoricContractCode), TableSizes: exported, LastBlock: covered}
 	matcher.Historic = map[common.Address]HistoricContract{historic: spec}
 	rtc := &rtChain{bc: bc, matcher: matcher}
 
@@ -153,7 +171,7 @@ func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: covered - 1, Limit: 1000}
+	req := FilterQuery{Pattern: pattern, FirstBlock: queryFirst, LastBlock: covered - lastBack, Limit: 1000}
 	logs, _, proof, err := matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
 	if err != nil {
 		t.Fatal(err)
@@ -177,12 +195,12 @@ func testHistoricContractEndToEnd(t *testing.T, sizes []uint64, covered uint64, 
 	}
 	// a contract with other code is rejected
 	bad := opts
-	bad.HistoricContracts = map[common.Address]HistoricContract{historic: {CodeHash: common.Hash{1}, TableSizes: sizes, LastBlock: covered}}
+	bad.HistoricContracts = map[common.Address]HistoricContract{historic: {CodeHash: common.Hash{1}, TableSizes: exported, LastBlock: covered}}
 	if _, err := proof.Verify(trusted, req, bad); err == nil {
 		t.Error("proof against a contract with other code was accepted")
 	}
 	// coverage ending before the proven tables is rejected
-	bad.HistoricContracts = map[common.Address]HistoricContract{historic: {CodeHash: spec.CodeHash, TableSizes: sizes, LastBlock: 10}}
+	bad.HistoricContracts = map[common.Address]HistoricContract{historic: {CodeHash: spec.CodeHash, TableSizes: exported, LastBlock: 10}}
 	if _, err := proof.Verify(trusted, req, bad); err == nil {
 		t.Error("proof past the contract's coverage was accepted")
 	}
