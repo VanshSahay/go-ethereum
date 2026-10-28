@@ -78,19 +78,35 @@ func BenchmarkDeriveTableWrites(b *testing.B) {
 	})
 }
 
-// BenchmarkExportTableRoots measures the root export of the 12-level
-// out-of-protocol hierarchy over a 20000-block chain.
+// BenchmarkExportTableRoots measures the root export of the out-of-protocol
+// hierarchy: eight levels (up to 16K-block tables) over 20000 blocks, and the
+// first ten levels of the 12-level preset 1, 4, 16, ..., 4M (up to 256K-block
+// tables, the largest that fits a feed that is not millions of blocks long)
+// over 270000 blocks.
 func BenchmarkExportTableRoots(b *testing.B) {
-	const blocks = 20000
-	f := heavyFeed(blocks, 5, 3)
-	sizes := []uint64{1, 4, 16, 64, 256, 1024, 4096, 16384}
-	for i := 0; i < b.N; i++ {
-		writes, err := ExportTableRoots(feedChain{f}, f.headers[blocks], sizes)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if len(writes) == 0 {
-			b.Fatal("no roots")
-		}
+	for _, tc := range []struct {
+		name   string
+		blocks int
+		sizes  []uint64
+	}{
+		{"8-levels-20k", 20000, []uint64{1, 4, 16, 64, 256, 1024, 4096, 16384}},
+		{"10-levels-270k", 270000, []uint64{1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			if tc.blocks > 100000 && testing.Short() {
+				b.Skip("builds a long feed")
+			}
+			f := heavyFeed(tc.blocks, 5, 3)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				writes, err := ExportTableRoots(feedChain{f}, f.headers[tc.blocks], tc.sizes)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(writes) == 0 {
+					b.Fatal("no roots")
+				}
+			}
+		})
 	}
 }
