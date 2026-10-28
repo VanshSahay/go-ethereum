@@ -473,7 +473,9 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, rangeFirst, rangeLast uin
 		if !ok {
 			return nil, fmt.Errorf("missing receipt proof for candidate at block #%d tx %d log %d", pos.BlockNumber, pos.TxIndex, pos.LogIndex)
 		}
-		if query.Pattern.matchLogs(logs, int(pos.LogIndex)) {
+		// a candidate derived through an offset matcher can lie beyond the
+		// receipt's last log; a log that does not exist is never a result
+		if int(pos.LogIndex) < len(logs) && query.Pattern.matchLogs(logs, int(pos.LogIndex)) {
 			res.logs = append(res.logs, logs[pos.LogIndex])
 		}
 	}

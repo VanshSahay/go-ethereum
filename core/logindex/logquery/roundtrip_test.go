@@ -54,7 +54,14 @@ type rtChain struct {
 	matcher *Matcher
 }
 
-func newRTChain(t *testing.T, blocks int) *rtChain {
+func newRTChain(t testing.TB, blocks int) *rtChain {
+	t.Helper()
+	return newRTChainWith(t, blocks, rtEmitterCode, func(int) int { return 1 })
+}
+
+// newRTChainWith builds the chain with the given emitter runtime code and a
+// per-block number of transactions calling it.
+func newRTChainWith(t testing.TB, blocks int, code []byte, txsPerBlock func(block int) int) *rtChain {
 	t.Helper()
 	config := *params.MergedTestChainConfig
 	config.AmsterdamTime = new(uint64)
@@ -65,7 +72,7 @@ func newRTChain(t *testing.T, blocks int) *rtChain {
 		Balance: common.Big0,
 	}
 	emitterAddr := crypto.CreateAddress(rtSender, 1)
-	alloc[emitterAddr] = types.Account{Code: rtEmitterCode}
+	alloc[emitterAddr] = types.Account{Code: code}
 	alloc[rtSender] = types.Account{Balance: new(big.Int).Lsh(big.NewInt(1), 60)}
 	genesis := &core.Genesis{Config: &config, Alloc: alloc}
 	engine := beacon.New(ethash.NewFaker())
@@ -77,16 +84,20 @@ func newRTChain(t *testing.T, blocks int) *rtChain {
 	if bc.LogIndex() == nil {
 		t.Fatal("chain has no log index")
 	}
+	var nonce uint64
 	_, genBlocks, _ := core.GenerateChainWithGenesis(genesis, engine, blocks, func(i int, gen *core.BlockGen) {
 		signer := types.LatestSigner(&config)
 		gasPrice := new(big.Int).Add(gen.BaseFee(), big.NewInt(1))
-		tx, _ := types.SignNewTx(rtKey, signer, &types.LegacyTx{
-			Nonce:    uint64(i),
-			To:       &emitterAddr,
-			Gas:      100_000,
-			GasPrice: gasPrice,
-		})
-		gen.AddTx(tx)
+		for range txsPerBlock(i + 1) {
+			tx, _ := types.SignNewTx(rtKey, signer, &types.LegacyTx{
+				Nonce:    nonce,
+				To:       &emitterAddr,
+				Gas:      100_000,
+				GasPrice: gasPrice,
+			})
+			nonce++
+			gen.AddTx(tx)
+		}
 	})
 	if _, err := bc.InsertChain(genBlocks); err != nil {
 		t.Fatalf("insert chain: %v", err)
