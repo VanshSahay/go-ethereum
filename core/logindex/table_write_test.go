@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
@@ -44,12 +45,17 @@ func (c feedChain) GetIndexReceipts(hash common.Hash, number uint64) (types.Rece
 
 var alwaysActive = func(*types.Header) bool { return true }
 
+// resetDerivedRoots empties the derived root cache: the tests reuse block
+// hashes with different history, which real blocks never do.
+func resetDerivedRoots() { derivedRoots = lru.NewCache[derivedKey, derivedRoot](256) }
+
 // TestDeriveTableWritesSchedule feeds 600 blocks through the derivation and
 // pins the publication schedule: a level-0 write for every block whose root
 // matches the stateless derivation, and a higher-level write for a level
 // exactly when its publication deadline falls on the block. The derived
 // higher-level roots must equal the roots of the indexer's merged tables.
 func TestDeriveTableWritesSchedule(t *testing.T) {
+	resetDerivedRoots()
 	f := newTestFeed(600)
 	ix := NewMemoryIndexer()
 	defer ix.Stop()
@@ -111,6 +117,7 @@ func TestDeriveTableWritesSchedule(t *testing.T) {
 // suppresses the table, and a due table without reachable history is an error
 // rather than a silently missing write.
 func TestDeriveTableWritesPurity(t *testing.T) {
+	resetDerivedRoots()
 	// block 575 publishes the 256-block table starting at block 256 (and the
 	// smaller tables that fall due there)
 	const number = 575
@@ -130,6 +137,7 @@ func TestDeriveTableWritesPurity(t *testing.T) {
 		t.Fatalf("derivation is not deterministic")
 	}
 
+	resetDerivedRoots()
 	// other receipts inside the covered range change the root
 	g := newTestFeed(600)
 	g.receipts[300] = testReceipts(9999)
@@ -141,6 +149,7 @@ func TestDeriveTableWritesPurity(t *testing.T) {
 		t.Error("history with other receipts gave the same root")
 	}
 
+	resetDerivedRoots()
 	// activation after the first block drops the higher-level tables
 	late := func(h *types.Header) bool { return h.Number.Uint64() > 256 }
 	w, err := DeriveTableWrites(feedChain{f}, late, number, parent, receipts)
@@ -157,6 +166,7 @@ func TestDeriveTableWritesPurity(t *testing.T) {
 	if _, err := DeriveTableWrites(nil, alwaysActive, number, parent, receipts); !errors.Is(err, ErrNoAncestry) {
 		t.Errorf("missing ancestry: error %v, want ErrNoAncestry", err)
 	}
+	resetDerivedRoots()
 	// unreachable history (a hole in the receipts): fail closed
 	h := newTestFeed(600)
 	h.receipts[300] = nil

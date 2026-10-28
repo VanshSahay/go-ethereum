@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/logindex"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 )
@@ -187,5 +189,42 @@ func (bc *BlockChain) backfillLogIndex(head *types.Header) {
 		}
 		ix.Backfill(header, receipts)
 		done++
+	}
+}
+
+// indexHistoryWindow is the number of blocks below a block whose receipts the
+// EIP-8304 table derivation can need: the largest table's range plus its
+// publication delay.
+var indexHistoryWindow = func() uint64 {
+	size := logindex.TableSizes[len(logindex.TableSizes)-1]
+	return size + size/4 - 1
+}()
+
+// checkIndexHistory warns at startup when EIP-8304 is active at the head but
+// the receipts the table derivation reads are missing from the database, for
+// example after history pruning or a sync that skipped them. Blocks on which a
+// table whose range covers a missing block falls due cannot be processed until
+// the receipts are back; the other blocks are unaffected.
+func (bc *BlockChain) checkIndexHistory() {
+	head := bc.CurrentBlock()
+	if head == nil || !bc.chainConfig.IsEIP8304(head.Number, head.Time) {
+		return
+	}
+	var missing []uint64
+	for n := head.Number.Uint64(); n > 0 && head.Number.Uint64()-n < indexHistoryWindow; n-- {
+		hash := bc.GetCanonicalHash(n)
+		if hash == (common.Hash{}) {
+			continue
+		}
+		header := bc.GetHeader(hash, n)
+		if header == nil || !bc.chainConfig.IsEIP8304(header.Number, header.Time) {
+			break // below the activation: no table covers it
+		}
+		if body := bc.GetBody(hash); body != nil && len(body.Transactions) > 0 && !rawdb.HasReceipts(bc.db, hash, n) {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		log.Warn("EIP-8304 table derivation needs receipts that are missing", "blocks", len(missing), "newest", missing[0], "oldest", missing[len(missing)-1], "window", indexHistoryWindow)
 	}
 }

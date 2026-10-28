@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
@@ -83,6 +84,35 @@ func DeriveTableWrites(chain AncestorReader, isActive func(*types.Header) bool, 
 // hash. It reports false if the table is not published because EIP-8304 was
 // not active at its first block.
 func deriveTableRoot(chain AncestorReader, isActive func(*types.Header) bool, number uint64, parentHash common.Hash, firstBlock, size uint64) (common.Hash, bool, error) {
+	// The table is a function of the chain ending at the parent and the
+	// activation rule, and blocks never change once they exist: a block that is
+	// derived again (built by the miner, then imported; re-imported after a
+	// reorg) reuses the result.
+	key := derivedKey{parentHash, size}
+	if cached, ok := derivedRoots.Get(key); ok {
+		return cached.root, cached.published, nil
+	}
+	root, published, err := computeTableRoot(chain, isActive, number, parentHash, firstBlock, size)
+	if err == nil {
+		derivedRoots.Add(key, derivedRoot{root, published})
+	}
+	return root, published, err
+}
+
+type derivedKey struct {
+	parent common.Hash
+	size   uint64
+}
+
+type derivedRoot struct {
+	root      common.Hash
+	published bool
+}
+
+// derivedRoots caches derived higher-level table roots.
+var derivedRoots = lru.NewCache[derivedKey, derivedRoot](256)
+
+func computeTableRoot(chain AncestorReader, isActive func(*types.Header) bool, number uint64, parentHash common.Hash, firstBlock, size uint64) (common.Hash, bool, error) {
 	// walk the ancestry from the parent down to the first block of the table
 	headers := make([]*types.Header, 0, number-firstBlock)
 	hash := parentHash

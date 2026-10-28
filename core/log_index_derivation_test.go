@@ -18,6 +18,7 @@ package core
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -117,5 +118,60 @@ func TestLogIndexDerivationIndependentOfIndexer(t *testing.T) {
 			}
 		}
 		bc.Stop()
+	}
+}
+
+// TestIndexHistoryPruned pins the behaviour on a node whose old receipts are
+// gone: blocks that need only the receipts it still has import normally, and
+// the first block on which a table covering a missing block falls due fails
+// loudly with the block it misses, then succeeds once the receipts are back.
+func TestIndexHistoryPruned(t *testing.T) {
+	config := *params.MergedTestChainConfig
+	config.AmsterdamTime = new(uint64)
+	config.EIP8304Time = new(uint64)
+	gspec := &Genesis{Config: &config, Alloc: SystemContractAllocs()}
+	gspec.Alloc[benchRootAddr] = types.Account{Balance: benchRootFunds}
+	logAddr := crypto.CreateAddress(benchRootAddr, 0)
+	engine := beacon.New(ethash.NewFaker())
+	_, chain, receipts := GenerateChainWithGenesis(gspec, engine, 700, func(i int, gen *BlockGen) {
+		gasPrice := new(big.Int).Add(gen.BaseFee(), big.NewInt(1))
+		tx := &types.LegacyTx{Nonce: gen.TxNonce(benchRootAddr), Gas: 200_000, GasPrice: gasPrice}
+		if i == 0 {
+			tx.Data, tx.Gas = eip8304LogCode, 3_000_000
+		} else {
+			tx.To = &logAddr
+		}
+		signed, _ := types.SignNewTx(benchRootKey, gen.Signer(), tx)
+		gen.AddTx(signed)
+	})
+	db := rawdb.NewMemoryDatabase()
+	bc, err := NewBlockChain(db, gspec, engine, &BlockChainConfig{LogIndexDisabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bc.Stop()
+	if n, err := bc.InsertChain(chain[:620]); err != nil {
+		t.Fatalf("block %d: %v", chain[n].NumberU64(), err)
+	}
+	// history pruning below the window, and one receipt set missing inside it
+	for n := uint64(1); n < 300; n++ {
+		rawdb.DeleteReceipts(db, chain[n-1].Hash(), n)
+	}
+	rawdb.DeleteReceipts(db, chain[599].Hash(), 600)
+
+	n, err := bc.InsertChain(chain[620:])
+	if err == nil {
+		t.Fatal("blocks needing a pruned receipt set were imported")
+	}
+	if got := chain[620+n].NumberU64(); got != 655 {
+		t.Errorf("import failed at block %d, want 655 (the first table covering block 600)", got)
+	}
+	if !strings.Contains(err.Error(), "receipts of block 600") {
+		t.Errorf("error does not name the missing receipts: %v", err)
+	}
+	// with the receipts back the rest imports
+	rawdb.WriteReceipts(db, chain[599].Hash(), 600, receipts[599])
+	if n, err := bc.InsertChain(chain[620+n:]); err != nil {
+		t.Fatalf("block %d after restoring the receipts: %v", chain[620+n].NumberU64(), err)
 	}
 }

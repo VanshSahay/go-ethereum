@@ -616,6 +616,8 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		rawdb.WriteChainConfig(db, genesisHash, chainConfig)
 	}
 
+	bc.checkIndexHistory()
+
 	// Start tx indexer if it's enabled.
 	if bc.logIndex != nil {
 		bc.startLogIndexer()
