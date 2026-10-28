@@ -14,6 +14,8 @@
 #   RESTART_CMD  command that restarts the node under test (default: docker
 #                restart of the el-1-geth container). With a geth --dev node,
 #                see dev/run.sh.
+#   TAMPER_ALL   non-empty: also flip every hex/base64 string of one proof, one at a
+#                time, and require each modified proof to be rejected.
 #   PROXY_PORT   listen port of the adversarial proxy (default 28545).
 #
 # With a second participant (the devnet runs one with --logindex.disable) the
@@ -56,7 +58,11 @@ verify_proof() {
   shift 2
   local ref_number ref_hash
   ref_number=$(jq -r '.refHeader.number' "$proof")
-  ref_hash=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
+  if [ "$ref_number" != "${REF_CACHE_N:-}" ]; then
+    REF_CACHE_HASH=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
+    REF_CACHE_N=$ref_number
+  fi
+  ref_hash=$REF_CACHE_HASH
   printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":%s,"limitLatest":%s%s}' "$topic" "${VFROM:-$FROM}" "${VTO:-$TO}" "${VLIMIT:-10000}" "${VLATEST:-false}" "${VCURSOR:-}" > "$OUT/query.json"
   "$VERIFY_BIN" -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@"
 }
@@ -207,6 +213,22 @@ for MODE in none drop-block forge-contract bad-ref truncate-range flip-hash; do
     fi
   fi
 done
+
+if [ -n "${TAMPER_ALL:-}" ]; then
+  echo
+  echo "== exhaustive tamper scan (every hex and base64 string of one proof, one byte flipped each) =="
+  SCANNED=0
+  while true; do
+    if OUTPUT=$(VTO=$SMALL_TO verify_proof "$OUT/proof-none.json" "$TRANSFER" tamper "$SCANNED" 2>&1); then
+      echo "$OUTPUT" | grep tampering >&2
+      echo "TAMPER SCAN FAILED: the proof verified with string $SCANNED modified" >&2
+      exit 1
+    fi
+    if echo "$OUTPUT" | grep -q "out of range"; then break; fi
+    SCANNED=$((SCANNED + 1))
+  done
+  echo "all $SCANNED single-byte modifications rejected"
+fi
 
 echo
 echo "== retained levels: an old range and a reverse (limitLatest) cursor walk =="

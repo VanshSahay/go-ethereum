@@ -6,8 +6,9 @@
 # Kurtosis devnet, see ../check.sh.
 #
 # Usage: dev/run.sh [blocks]      (default 1200)
-# Environment: HTTP_PORT (default 28545), PROXY_PORT (default 29545), KEEP=1 to
-# leave the node and its datadir running for inspection.
+# Environment: HTTP_PORT (default 28545), PROXY_PORT (default 29545), REWIND
+# (blocks to rewind and rebuild before the check, default 200, 0 to skip), KEEP=1
+# to leave the node and its datadir running for inspection.
 set -euo pipefail
 BLOCKS=${1:-1200}
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -42,9 +43,20 @@ fi
 start_node
 "$WORK/mkchain" -rpc "$RPC" -blocks "$BLOCKS" | tail -2
 
+# rewind past the last due 256-block table and rebuild the chain: the blocks
+# differ (new timestamps), so the index must follow a reorg across a due
+# height, and the check below runs on the rebuilt chain. REWIND=0 skips it.
+REWIND=${REWIND:-200}
+if [ "$REWIND" -gt 0 ]; then
+  echo "== rewinding $REWIND blocks and rebuilding =="
+  cast rpc --rpc-url "$RPC" debug_setHead "$(printf '0x%x' $((BLOCKS - REWIND)))" > /dev/null
+  echo "head after rewind: $(cast block-number --rpc-url "$RPC")"
+  "$WORK/mkchain" -rpc "$RPC" -blocks "$BLOCKS" | tail -1
+fi
+
 # the dev node has no spammer: a small page limit exercises cursor paging on
 # the one-log-per-block chain
-export TARGET=$BLOCKS PAGE_LIMIT=${PAGE_LIMIT:-300} PROXY_PORT
+export TARGET=$BLOCKS PAGE_LIMIT=${PAGE_LIMIT:-300} PROXY_PORT TAMPER_ALL=${TAMPER_ALL:-1}
 cat > "$WORK/restart.sh" <<RESTART
 #!/usr/bin/env bash
 set -e

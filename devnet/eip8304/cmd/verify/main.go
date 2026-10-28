@@ -14,11 +14,13 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -187,7 +189,13 @@ func loadProof(raw []byte, tamperIdx int) (*logquery.QueryProof, error) {
 }
 
 // tamper flips one byte of the hex string at the given index of the proof
-// document, producing a proof that must be rejected.
+// document, producing a proof that must be rejected. The strings are numbered
+// in a fixed order (sorted object keys) so an index names the same string on
+// every run. Three kinds are not proof material and are skipped: the query and
+// the reference header (the claim's inputs: modifying them yields a different,
+// self-consistent claim rather than a broken proof) and the "hash" member of a
+// header, which is derived from the header's other fields and ignored on
+// decoding.
 func tamper(raw []byte, idx int) ([]byte, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -198,62 +206,85 @@ func tamper(raw []byte, idx int) ([]byte, error) {
 		// a bare proof document
 		blob = raw
 	}
-	// collect every hex string in the proof material: the query and the
-	// reference header are skipped because they are the claim's inputs, not
-	// proof material, and modifying them yields a different, self-consistent
-	// claim rather than a broken proof
-	var hexStrings []string
-	var doc2 map[string]json.RawMessage
-	if err := json.Unmarshal(blob, &doc2); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(blob)))
+	decoder.UseNumber()
+	var root map[string]interface{}
+	if err := decoder.Decode(&root); err != nil {
 		return nil, err
 	}
-	delete(doc2, "query")
-	delete(doc2, "refHeader")
-	material, err := json.Marshal(doc2)
-	if err != nil {
-		return nil, err
+	type site struct {
+		get func() string
+		set func(string)
 	}
-	forEachJSONString(material, func(s string) {
-		if strings.HasPrefix(s, "0x") && len(s) >= 10 {
-			hexStrings = append(hexStrings, s)
+	var sites []site
+	var walk func(value interface{}, top bool)
+	walk = func(value interface{}, top bool) {
+		switch v := value.(type) {
+		case []interface{}:
+			for i := range v {
+				i := i
+				if s, ok := v[i].(string); ok {
+					if _, ok := flipByte(s); ok {
+						sites = append(sites, site{func() string { return v[i].(string) }, func(n string) { v[i] = n }})
+					}
+					continue
+				}
+				walk(v[i], false)
+			}
+		case map[string]interface{}:
+			keys := make([]string, 0, len(v))
+			for key := range v {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				key := key
+				if top && (key == "query" || key == "refHeader") || key == "hash" {
+					continue
+				}
+				if s, ok := v[key].(string); ok {
+					if _, ok := flipByte(s); ok {
+						sites = append(sites, site{func() string { return v[key].(string) }, func(n string) { v[key] = n }})
+					}
+					continue
+				}
+				walk(v[key], false)
+			}
 		}
-	})
-	if idx >= len(hexStrings) {
-		return nil, fmt.Errorf("tamper index %d out of range, %d hex strings found", idx, len(hexStrings))
 	}
-	target := hexStrings[idx]
-	b, err := hex.DecodeString(target[2:])
-	if err != nil {
-		return nil, err
+	walk(root, true)
+	if idx >= len(sites) {
+		return nil, fmt.Errorf("tamper index %d out of range, %d hex strings found", idx, len(sites))
+	}
+	target := sites[idx].get()
+	replacement, _ := flipByte(target)
+	fmt.Printf("tampering: %s -> %s\n", target[:min(len(target), 20)]+"…", replacement[:min(len(replacement), 20)]+"…")
+	sites[idx].set(replacement)
+	return json.Marshal(root)
+}
+
+// flipByte returns the string with the middle byte of its binary content
+// inverted: the content of a 0x hex string, or of a base64 string (the encoding
+// of the proof's table entries and hashes). It reports false for strings that
+// are neither, like short quantities.
+func flipByte(s string) (string, bool) {
+	if strings.HasPrefix(s, "0x") {
+		if len(s) < 10 {
+			return "", false
+		}
+		b, err := hex.DecodeString(s[2:])
+		if err != nil || len(b) == 0 {
+			return "", false
+		}
+		b[len(b)/2] ^= 0xff
+		return "0x" + hex.EncodeToString(b), true
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(b) < 4 {
+		return "", false
 	}
 	b[len(b)/2] ^= 0xff
-	replacement := "0x" + hex.EncodeToString(b)
-	fmt.Printf("tampering: %s -> %s\n", target[:min(len(target), 20)]+"…", replacement[:min(len(replacement), 20)]+"…")
-	patched := strings.Replace(string(blob), target, replacement, 1)
-	return []byte(patched), nil
-}
-
-func forEachJSONString(v json.RawMessage, fn func(string)) {
-	var value interface{}
-	if err := json.Unmarshal(v, &value); err != nil {
-		return
-	}
-	walk(value, fn)
-}
-
-func walk(value interface{}, fn func(string)) {
-	switch v := value.(type) {
-	case string:
-		fn(v)
-	case []interface{}:
-		for _, item := range v {
-			walk(item, fn)
-		}
-	case map[string]interface{}:
-		for _, item := range v {
-			walk(item, fn)
-		}
-	}
+	return base64.StdEncoding.EncodeToString(b), true
 }
 
 func fatal(err interface{}) {
