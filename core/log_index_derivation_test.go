@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 )
@@ -80,9 +81,14 @@ func TestLogIndexDerivationIndependentOfIndexer(t *testing.T) {
 	const forkAt = 560
 	side, _ := GenerateChain(&config, chain[forkAt-1], engine, genDB, 80, makeGen(func(i int) int { return i%2 + 2 }))
 
+	// the parallel (BAL driven) and the sequential processors must both accept
+	// the chain, with and without an index: every combination derives the
+	// same table roots from the chain's history
 	for name, cfg := range map[string]*BlockChainConfig{
-		"indexed":  nil,
-		"no-index": {LogIndexDisabled: true},
+		"indexed":             nil,
+		"no-index":            {LogIndexDisabled: true},
+		"indexed-sequential":  {VmConfig: vm.Config{DisableParallelExecution: true}},
+		"no-index-sequential": {LogIndexDisabled: true, VmConfig: vm.Config{DisableParallelExecution: true}},
 	} {
 		bc, err := NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, cfg)
 		if err != nil {
