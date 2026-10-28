@@ -101,6 +101,10 @@ type Matcher struct {
 	// MaxCandidates bounds the number of candidate positions a single table
 	// scan may derive: a query matching more than that is too broad to serve.
 	MaxCandidates int
+
+	// Historic lists the out-of-protocol index contracts the matcher's index
+	// holds tables for; their roots are read without the publication schedule.
+	Historic map[common.Address]HistoricContract
 }
 
 // DefaultMaxCandidates is the candidate bound of a matcher made by NewMatcher.
@@ -235,7 +239,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		if err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
-		if proof, err = makeQueryProof(ctx, refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, provers, pin); err != nil {
+		if proof, err = makeQueryProof(ctx, refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, mc.Historic, provers, pin); err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
 	}

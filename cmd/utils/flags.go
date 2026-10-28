@@ -365,6 +365,21 @@ var (
 		Usage:    "Number of recent blocks the EIP-8304 log index catches up to on a fresh start (default 65536); older ranges are trimmed",
 		Category: flags.StateCategory,
 	}
+	LogIndexHistoricContractFlag = &cli.StringFlag{
+		Name:     "logindex.historic.contract",
+		Usage:    "Address of a historic index contract holding table roots (out-of-protocol EIP-8304 index)",
+		Category: flags.StateCategory,
+	}
+	LogIndexHistoricSizesFlag = &cli.StringFlag{
+		Name:     "logindex.historic.sizes",
+		Usage:    "Comma separated table sizes of the historic index contract, starting at 1 (for example 1,4,16,64,256)",
+		Category: flags.StateCategory,
+	}
+	LogIndexHistoricLastFlag = &cli.Uint64Flag{
+		Name:     "logindex.historic.last",
+		Usage:    "Last block the historic index contract holds table roots for",
+		Category: flags.StateCategory,
+	}
 	LogExportCheckpointsFlag = &cli.StringFlag{
 		Name:     "history.logs.export",
 		Usage:    "Export checkpoints to file in go source file format",
@@ -1895,6 +1910,27 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 	if ctx.IsSet(LogIndexHistoryFlag.Name) {
 		cfg.LogIndexHistory = ctx.Uint64(LogIndexHistoryFlag.Name)
+	}
+	if ctx.IsSet(LogIndexHistoricContractFlag.Name) {
+		addr := ctx.String(LogIndexHistoricContractFlag.Name)
+		if !common.IsHexAddress(addr) {
+			Fatalf("Invalid historic index contract address %q", addr)
+		}
+		cfg.LogIndexHistoricContract = common.HexToAddress(addr)
+	}
+	if ctx.IsSet(LogIndexHistoricSizesFlag.Name) {
+		var sizes []uint64
+		for _, field := range strings.Split(ctx.String(LogIndexHistoricSizesFlag.Name), ",") {
+			size, err := strconv.ParseUint(strings.TrimSpace(field), 10, 64)
+			if err != nil {
+				Fatalf("Invalid historic index table size %q: %v", field, err)
+			}
+			sizes = append(sizes, size)
+		}
+		cfg.LogIndexHistoricSizes = sizes
+	}
+	if ctx.IsSet(LogIndexHistoricLastFlag.Name) {
+		cfg.LogIndexHistoricLast = ctx.Uint64(LogIndexHistoricLastFlag.Name)
 	}
 	if ctx.IsSet(LogNoHistoryFlag.Name) {
 		cfg.LogNoHistory = ctx.Bool(LogNoHistoryFlag.Name)

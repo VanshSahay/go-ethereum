@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
 	"github.com/ethereum/go-ethereum/core/history"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -39,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool/locals"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -518,7 +520,23 @@ func (b *EthAPIBackend) LogIndexMatcher() *logquery.Matcher {
 	if ix == nil {
 		return nil
 	}
-	return logquery.NewMatcher(ix, logIndexProverBackend{b.eth.blockchain})
+	matcher := logquery.NewMatcher(ix, logIndexProverBackend{b.eth.blockchain})
+	if cfg := b.eth.config; cfg != nil && len(cfg.LogIndexHistoricSizes) > 0 {
+		matcher.Historic = map[common.Address]logquery.HistoricContract{
+			cfg.LogIndexHistoricContract: {
+				CodeHash:   crypto.Keccak256Hash(logquery.HistoricContractCode),
+				TableSizes: cfg.LogIndexHistoricSizes,
+				LastBlock:  cfg.LogIndexHistoricLast,
+			},
+		}
+	}
+	return matcher
+}
+
+// LogIndexTableRoots computes the roots of the complete tables of the given
+// sizes up to the current head.
+func (b *EthAPIBackend) LogIndexTableRoots(sizes []uint64) ([]logindex.TableWrite, error) {
+	return b.eth.blockchain.ExportLogIndexRoots(sizes)
 }
 
 // LogIndexChainView adapts the chain database to the log query's chain view,

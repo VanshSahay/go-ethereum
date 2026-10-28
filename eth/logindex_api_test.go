@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -281,5 +282,35 @@ func TestPurethRLPEncoding(t *testing.T) {
 	}
 	if _, err := api.GetLogsWithProofV1(context.Background(), ethapi.PurethQueryArgs{Address: &emitterAddr, Encoding: "xml"}); err == nil {
 		t.Error("unknown encoding accepted")
+	}
+}
+
+// TestPurethTableRoots pins the table root export used to seed a historic
+// index contract: the roots match the level-0 derivation and the producer's
+// own table writes.
+func TestPurethTableRoots(t *testing.T) {
+	bc, backend, _ := newAPIChain(t, 10, false)
+	api := ethapi.NewPurethAPI(backend)
+
+	roots, err := api.GetTableRootsV1(context.Background(), []hexutil.Uint64{1, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 10+1 { // ten level-0 tables and the 4-block table at 4
+		t.Fatalf("exported %d roots", len(roots))
+	}
+	for _, r := range roots {
+		if r.TableSize != 1 {
+			continue
+		}
+		n := uint64(r.FirstBlock)
+		header := bc.GetHeaderByNumber(n)
+		want := logindex.BuildLevel0Root(n, header.ParentHash, bc.GetReceiptsByHash(header.Hash()))
+		if r.Root != want {
+			t.Errorf("block %d: exported root %x, want %x", n, r.Root, want)
+		}
+	}
+	if _, err := api.GetTableRootsV1(context.Background(), nil); err == nil {
+		t.Error("empty size list accepted")
 	}
 }

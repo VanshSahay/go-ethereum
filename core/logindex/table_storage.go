@@ -190,6 +190,17 @@ func (ts *tableStorage) getRangeReaders(blockRange common.Range[uint64], publish
 	rs := common.SingleRangeSet[uint64](blockRange)
 	for level := len(ts.params.tableLevels) - 1; level >= 0; level-- {
 		avail := ts.complete[level].Intersection(shiftRangeSetLevel(rs, ts.params.tableLevels[0], ts.params.tableLevels[level], true))
+		if ts.params.historic {
+			// only tables the contract holds a root for can be served
+			var held common.RangeSet[uint64]
+			count := ts.params.tableLevels[level].blockCount
+			for index := range avail.Iter() {
+				if (index+1)*count-1 <= ts.params.historicLast {
+					held = held.Union(common.SingleRangeSet[uint64](common.NewRange[uint64](index, 1)))
+				}
+			}
+			avail = held
+		}
 		if publishedBefore != 0 {
 			var provable common.RangeSet[uint64]
 			count := ts.params.tableLevels[level].blockCount
@@ -203,6 +214,11 @@ func (ts *tableStorage) getRangeReaders(blockRange common.Range[uint64], publish
 		for index := range avail.Iter() {
 			id := tableID{level: level, index: index}
 			if tr, ok := ts.readers[id]; ok {
+				if ts.params.historic {
+					c := *tr
+					c.IndexContract = ts.params.indexContract
+					tr = &c
+				}
 				readers = append(readers, tr)
 			} else {
 				panic("table reader not found for complete table")

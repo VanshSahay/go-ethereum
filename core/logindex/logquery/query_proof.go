@@ -47,6 +47,10 @@ type VerifyOptions struct {
 	// hash the contract must have in the reference state; the zero hash accepts
 	// any code.
 	IndexContracts map[common.Address]common.Hash
+
+	// HistoricContracts lists accepted out-of-protocol index contracts, which
+	// are trusted by configuration for the table ranges they hold.
+	HistoricContracts map[common.Address]HistoricContract
 }
 
 // DefaultVerifyOptions accepts exactly the protocol's index contract with its
@@ -113,7 +117,18 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 	coverage := 0
 	for i := range p.TableQueryProofs {
 		tqp := &p.TableQueryProofs[i]
-		path, err := checkTable(tqp.TableSize, tqp.FirstBlock, refNumber)
+		if int(tqp.IndexContract) >= len(p.IndexContracts) {
+			return nil, errors.New("index contract reference out of range")
+		}
+		var (
+			path tablePath
+			err  error
+		)
+		if spec, ok := opts.HistoricContracts[p.IndexContracts[tqp.IndexContract]]; ok {
+			path, err = checkHistoricTable(spec, tqp.TableSize, tqp.FirstBlock, refNumber)
+		} else {
+			path, err = checkTable(tqp.TableSize, tqp.FirstBlock, refNumber)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -165,6 +180,9 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 		}
 		contract := p.IndexContracts[tqp.IndexContract]
 		codeHash, accepted := opts.IndexContracts[contract]
+		if spec, ok := opts.HistoricContracts[contract]; ok {
+			codeHash, accepted = spec.CodeHash, true
+		}
 		if !accepted {
 			return nil, errors.New("index contract is not accepted")
 		}

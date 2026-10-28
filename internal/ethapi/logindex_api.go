@@ -25,6 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -37,6 +38,7 @@ type LogIndexBackend interface {
 	HeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*types.Header, error)
 	LogIndexMatcher() *logquery.Matcher
 	LogIndexChainView(refHeader *types.Header) logquery.ChainView
+	LogIndexTableRoots(sizes []uint64) ([]logindex.TableWrite, error)
 }
 
 // PurethQueryArgs describes a proven log query: an optional reference head
@@ -200,4 +202,37 @@ func (api *PurethAPI) refHeader(ctx context.Context, refBlock *rpc.BlockNumberOr
 		return nil, errors.New("the reference head is above the current head")
 	}
 	return header, nil
+}
+
+// TableRoot is the root of one index table.
+type TableRoot struct {
+	FirstBlock hexutil.Uint64 `json:"firstBlock"`
+	TableSize  hexutil.Uint64 `json:"tableSize"`
+	Root       common.Hash    `json:"root"`
+}
+
+// maxExportSizes bounds the table size list of an export request.
+const maxExportSizes = 16
+
+// GetTableRootsV1 returns the roots of every complete table of the given sizes
+// up to the current head, derived from the chain's blocks and receipts. They
+// are the content to hardcode into a historic index contract (see
+// logquery.HistoricStorage) when the index runs out of protocol.
+func (api *PurethAPI) GetTableRootsV1(ctx context.Context, sizes []hexutil.Uint64) ([]TableRoot, error) {
+	if len(sizes) == 0 || len(sizes) > maxExportSizes {
+		return nil, fmt.Errorf("between 1 and %d table sizes are required", maxExportSizes)
+	}
+	raw := make([]uint64, len(sizes))
+	for i, size := range sizes {
+		raw[i] = uint64(size)
+	}
+	writes, err := api.backend.LogIndexTableRoots(raw)
+	if err != nil {
+		return nil, err
+	}
+	roots := make([]TableRoot, len(writes))
+	for i, w := range writes {
+		roots[i] = TableRoot{hexutil.Uint64(w.FirstBlock), hexutil.Uint64(w.TableSize), w.Root}
+	}
+	return roots, nil
 }

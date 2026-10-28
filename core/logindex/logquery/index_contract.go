@@ -83,6 +83,38 @@ func checkTable(tableSize, firstBlock, refNumber uint64) (tablePath, error) {
 	return pathGet, nil
 }
 
+// HistoricContract describes an out-of-protocol index contract: a contract
+// holding the roots of the tables of a past block range under the same get()
+// interface as the protocol's contract, but without publication schedule or
+// ring window. It is the verifier's side of a hierarchy made with
+// logindex.NewHistoricParams.
+type HistoricContract struct {
+	// CodeHash is the code hash the contract must have in the reference
+	// state; the zero hash accepts any code.
+	CodeHash common.Hash
+	// TableSizes lists the table sizes the contract holds roots for.
+	TableSizes []uint64
+	// LastBlock is the last block the contract holds table roots for.
+	LastBlock uint64
+}
+
+// checkHistoricTable validates the table parameters a proof claims against a
+// historic contract: a listed size at an aligned first block, entirely behind
+// the reference block. The root is always read through get().
+func checkHistoricTable(spec HistoricContract, tableSize, firstBlock, refNumber uint64) (tablePath, error) {
+	if !slices.Contains(spec.TableSizes, tableSize) {
+		return 0, errors.New("invalid table size")
+	}
+	if firstBlock%tableSize != 0 {
+		return 0, errors.New("table is not aligned to its size")
+	}
+	end, carry := bits.Add64(firstBlock, tableSize, 0)
+	if carry != 0 || end > refNumber || end-1 > spec.LastBlock {
+		return 0, errors.New("table is not behind the reference block or past the contract's coverage")
+	}
+	return pathGet, nil
+}
+
 type contractVerifierBackend interface {
 	ChainConfig() *params.ChainConfig
 }

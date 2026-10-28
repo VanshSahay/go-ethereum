@@ -204,6 +204,13 @@ type BlockChainConfig struct {
 	LogIndexDisabled bool
 	LogIndexHistory  uint64
 
+	// Out-of-protocol operation: when LogIndexHistoricSizes is set the index
+	// follows the given table sizes with the roots in the historic contract
+	// at LogIndexHistoricContract instead of the protocol's contract.
+	LogIndexHistoricContract common.Address
+	LogIndexHistoricSizes    []uint64
+	LogIndexHistoricLast     uint64 // the last block the contract holds roots for
+
 	// State snapshot related options
 	SnapshotLimit   int  // Memory allowance (MB) to use for caching snapshot entries in memory
 	SnapshotNoBuild bool // Whether the background generation is allowed
@@ -453,10 +460,16 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 			ix  *logindex.Indexer
 			err error
 		)
+		indexParams := logindex.DefaultParams()
+		if len(cfg.LogIndexHistoricSizes) > 0 {
+			if indexParams, err = logindex.NewHistoricParams(cfg.LogIndexHistoricSizes, cfg.LogIndexHistoricContract, cfg.LogIndexHistoricLast); err != nil {
+				return nil, err
+			}
+		}
 		if cfg.LogIndexPath != "" {
 			// the canonical hash source lets a restart validate its persisted
 			// tables against the chain instead of dropping them
-			ix, err = logindex.NewIndexer(logindex.DefaultParams(), logindex.Config{
+			ix, err = logindex.NewIndexer(indexParams, logindex.Config{
 				History: cfg.logIndexHistory(),
 				BlockHashAt: func(n uint64) common.Hash {
 					if header := bc.GetHeaderByNumber(n); header != nil {
@@ -466,7 +479,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 				},
 			}, cfg.LogIndexPath)
 		} else {
-			ix = logindex.NewMemoryIndexer()
+			ix = logindex.NewMemoryIndexerWithParams(indexParams)
 		}
 		if err != nil {
 			return nil, err
@@ -1791,6 +1804,12 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		bc.triedb.Dereference(root)
 	}
 	return nil
+}
+
+// ExportLogIndexRoots computes the roots of the complete tables of the given
+// sizes up to the current head, for hardcoding into a historic index contract.
+func (bc *BlockChain) ExportLogIndexRoots(sizes []uint64) ([]logindex.TableWrite, error) {
+	return logindex.ExportTableRoots(bc, bc.CurrentBlock(), sizes)
 }
 
 // LogIndex returns the EIP-8304 log index of the chain, or nil when indexing

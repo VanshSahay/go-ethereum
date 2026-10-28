@@ -78,6 +78,11 @@ func NewMemoryIndexer() *Indexer {
 	return newIndexer(params, Config{}, nil, newTableStorage(params))
 }
 
+// NewMemoryIndexerWithParams is NewMemoryIndexer for a custom table hierarchy.
+func NewMemoryIndexerWithParams(params *Params) *Indexer {
+	return newIndexer(params, Config{}, nil, newTableStorage(params))
+}
+
 // NewIndexer creates a file backed indexer storing tables under path and
 // reloading any tables persisted there by a previous run. The indexer head is
 // restored from the loaded tables so the scheduler cannot mistake the indexed
@@ -337,6 +342,9 @@ func (ix *Indexer) GetRangeReaders(refBlockHash common.Hash, blockRange common.R
 	}
 	if blockRange.IsEmpty() {
 		return nil
+	}
+	if ix.params.historic {
+		publishedBefore = 0 // the roots are not on a publication schedule
 	}
 	return ix.storage.getRangeReaders(blockRange, publishedBefore)
 }

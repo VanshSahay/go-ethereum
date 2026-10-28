@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -47,6 +48,10 @@ func main() {
 		refHash = flag.String("ref-hash", "", "trusted reference block hash the proof is anchored to")
 		queryFn = flag.String("query", "", "file with the requested query")
 		network = flag.String("network", "mainnet", "chain config: mainnet, sepolia or devnet")
+
+		historic      = flag.String("historic-contract", "", "address of a trusted historic (out-of-protocol) index contract")
+		historicSizes = flag.String("historic-sizes", "1,4,16,64,256", "table sizes the historic contract holds roots for")
+		historicLast  = flag.Uint64("historic-last", 0, "last block the historic contract holds roots for")
 	)
 	flag.Parse()
 	args := flag.Args()
@@ -85,7 +90,25 @@ func main() {
 		fmt.Printf("VERIFY: FAIL: proof reference header %s is not the trusted %s\n", proof.RefHeader.Hash().Hex(), *refHash)
 		os.Exit(1)
 	}
-	res, err := proof.Verify(&proof.RefHeader, req, logquery.DefaultVerifyOptions(config))
+	opts := logquery.DefaultVerifyOptions(config)
+	if *historic != "" {
+		var sizes []uint64
+		for _, field := range strings.Split(*historicSizes, ",") {
+			var size uint64
+			if _, err := fmt.Sscanf(strings.TrimSpace(field), "%d", &size); err != nil {
+				fatal(err)
+			}
+			sizes = append(sizes, size)
+		}
+		opts.HistoricContracts = map[common.Address]logquery.HistoricContract{
+			common.HexToAddress(*historic): {
+				CodeHash:   crypto.Keccak256Hash(logquery.HistoricContractCode),
+				TableSizes: sizes,
+				LastBlock:  *historicLast,
+			},
+		}
+	}
+	res, err := proof.Verify(&proof.RefHeader, req, opts)
 	if err != nil {
 		fmt.Printf("VERIFY: FAIL: %v\n", err)
 		os.Exit(1)

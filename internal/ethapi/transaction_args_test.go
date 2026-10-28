@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -422,6 +423,9 @@ func (b *backendMock) NewMatcherBackend() filtermaps.MatcherBackend { return nil
 func (b *backendMock) LogIndexMatcher() *logquery.Matcher           { return nil }
 func (b *backendMock) LogIndexChainView(refHeader *types.Header) logquery.ChainView {
 	return nil
+}
+func (b *backendMock) LogIndexTableRoots(sizes []uint64) ([]logindex.TableWrite, error) {
+	return nil, nil
 }
 
 func (b *backendMock) HistoryPruningCutoff() uint64       { return 0 }

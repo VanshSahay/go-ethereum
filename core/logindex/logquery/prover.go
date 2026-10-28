@@ -375,7 +375,7 @@ type pinRequest struct {
 // coverage tables chained through their parent block entries, followed by the
 // optional pin table, with each table root proven against the reference
 // header's state.
-func makeQueryProof(ctx context.Context, refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, provers []*tableProver, pin *pinRequest) (*QueryProof, error) {
+func makeQueryProof(ctx context.Context, refHeader *types.Header, query *FilterQuery, firstBlock, lastBlock uint64, backend contractProverBackend, historic map[common.Address]HistoricContract, provers []*tableProver, pin *pinRequest) (*QueryProof, error) {
 	proof := &QueryProof{
 		Query:            *query,
 		RefHeader:        *refHeader,
@@ -416,7 +416,12 @@ func makeQueryProof(ctx context.Context, refHeader *types.Header, query *FilterQ
 		// in the reference block itself are read from the raw storage slot (get()
 		// still reverts there), older ones by executing get() on the proven state
 		br := prover.reader.BlockRange()
-		path, err := checkTable(br.Count(), br.First(), refHeader.Number.Uint64())
+		var path tablePath
+		if spec, ok := historic[prover.reader.IndexContract]; ok {
+			path, err = checkHistoricTable(spec, br.Count(), br.First(), refHeader.Number.Uint64())
+		} else {
+			path, err = checkTable(br.Count(), br.First(), refHeader.Number.Uint64())
+		}
 		if err != nil {
 			return nil, err
 		}

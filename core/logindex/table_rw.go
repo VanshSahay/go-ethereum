@@ -45,7 +45,39 @@ var ErrTableDeleted = errors.New("index table deleted")
 type Params struct {
 	tableLevels                []tableLevel
 	fileStorageThresholdHeight uint
+
+	// out-of-protocol operation: the table roots live in a contract of the
+	// given address that is not fed by the protocol's publication schedule
+	historic      bool
+	indexContract common.Address
+	historicLast  uint64 // the last block the contract holds roots for
 }
+
+// NewHistoricParams returns the parameters of an out-of-protocol hierarchy:
+// tables of the given sizes whose roots are stored in the contract at the
+// given address for the blocks up to lastBlock, with no publication schedule
+// and no ring window. The sizes must start at 1 and each must be a multiple of
+// the previous one.
+func NewHistoricParams(sizes []uint64, contract common.Address, lastBlock uint64) (*Params, error) {
+	if len(sizes) == 0 || sizes[0] != 1 {
+		return nil, errors.New("table sizes must start at 1")
+	}
+	for i := 1; i < len(sizes); i++ {
+		if sizes[i] <= sizes[i-1] || sizes[i]%sizes[i-1] != 0 {
+			return nil, errors.New("each table size must be a larger multiple of the previous one")
+		}
+	}
+	return &Params{
+		tableLevels:                makeTableLevels(sizes),
+		fileStorageThresholdHeight: 12,
+		historic:                   true,
+		indexContract:              contract,
+		historicLast:               lastBlock,
+	}, nil
+}
+
+// Historic reports whether the hierarchy is out-of-protocol.
+func (p *Params) Historic() bool { return p.historic }
 
 // DefaultParams returns the EIP-8304 protocol hierarchy: five levels with the
 // spec's table sizes.
