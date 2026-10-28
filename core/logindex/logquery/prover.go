@@ -17,7 +17,6 @@
 package logquery
 
 import (
-	"bytes"
 	"errors"
 	"math"
 	"math/bits"
@@ -37,10 +36,12 @@ import (
 // proven (all touched entries; the cost optimizer of the reference design is
 // deliberately omitted, proven supersets are always sound).
 type tableProver struct {
-	reader       *logindex.TableReader
-	treeHeight   int
-	blockProofs  map[uint64]*blockProof
-	resultCount  int
+	reader      *logindex.TableReader
+	treeHeight  int
+	blockProofs map[uint64]*blockProof
+	resultCount int
+	// valueEntries holds the table indices of the entry runs the candidate
+	// positions were derived from, with their bounding neighbors
 	valueEntries []uint64
 }
 
@@ -49,38 +50,6 @@ func newTableProver(reader *logindex.TableReader) *tableProver {
 		reader:     reader,
 		treeHeight: 64 - bits.LeadingZeros64(max(reader.EntryCount, 1)-1),
 	}
-}
-
-// proveValueEntries proves every index entry of the pattern's search values
-// within the scanned range: the verifier reconstructs the exact potential
-// match set from them, which makes the exclusion cross-check complete.
-func (tp *tableProver) proveValueEntries(values []matcherValue, first, last types.IndexPosition) error {
-	for _, value := range values {
-		entry := types.EncodeEntry(types.EntryType(value.typ), value.content, first.BlockNumber, first.TxIndex, first.LogIndex)
-		pos, _, err := tp.reader.SeekEntry(entry)
-		if err != nil {
-			return err
-		}
-		for ; pos < tp.reader.EntryCount; pos++ {
-			e, err := tp.reader.GetEntry(pos)
-			if err != nil {
-				return err
-			}
-			eTyp, eContent, eBlock, eTx, eLog, err := types.EntryFields(e)
-			if err != nil {
-				return err
-			}
-			if uint32(eTyp) != value.typ || !bytes.Equal(eContent, value.content) {
-				break
-			}
-			p := types.IndexPosition{BlockNumber: eBlock, TxIndex: eTx, LogIndex: eLog}
-			if p.Compare(last) > 0 {
-				break
-			}
-			tp.valueEntries = append(tp.valueEntries, pos)
-		}
-	}
-	return nil
 }
 
 func (tp *tableProver) addBlockProofs(newProofs map[uint64]*blockProof, newResults int) {
@@ -138,7 +107,6 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.H
 		}
 		for _, mtx := range bp.matchingTxs {
 			proof.EntryIndices = append(proof.EntryIndices, mtx.txEntryIndex)
-			proof.EntryIndices = append(proof.EntryIndices, mtx.logEntries...)
 		}
 	}
 	if refHeader != nil {
@@ -190,6 +158,20 @@ func (tp *tableProver) finalize(proveParentBlock common.Hash, refHeader *types.H
 		return tableQueryProof{}, err
 	}
 	return proof, nil
+}
+
+// lastProvenBlock returns the header hash of the table's last proven block
+// when it sits at the table's last position: the next table's parent block
+// entry chains to it.
+func (tqp *tableQueryProof) lastProvenBlock() common.Hash {
+	if len(tqp.BlockResults) == 0 {
+		return common.Hash{}
+	}
+	last := tqp.BlockResults[len(tqp.BlockResults)-1]
+	if last.Header.Number.Uint64() == tqp.FirstBlock+tqp.TableSize-1 {
+		return last.Header.Hash()
+	}
+	return common.Hash{}
 }
 
 // makeProofHashes appends the non-leaf tree node hashes between proven entry
@@ -300,9 +282,6 @@ type blockProof struct {
 type matchingTx struct {
 	txEntryIndex      uint64
 	receiptProofAdded bool
-	// logEntries holds the index entry of every matched log of the
-	// transaction for each value the query pattern searches for
-	logEntries []uint64
 }
 
 func newBlockProof(header *types.Header, blockEntryIndex uint64) *blockProof {

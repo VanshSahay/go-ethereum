@@ -106,13 +106,28 @@ func NewMatcher(logIndex logIndex, contractProverBackend contractProverBackend) 
 }
 
 // GetMatches runs the query and returns the matching logs, the block range
-// they span and, when prove is set, the self-contained query proof.
+// they are proven for and, when prove is set, the self-contained query proof.
+//
+// At most query.Limit logs are returned, the oldest ones or, with LimitLatest,
+// the newest ones. When the limit is reached the proven range is cut at the
+// block holding the last returned log (the whole block is proven, so the
+// verifier trims the surplus logs of that block identically); otherwise the
+// proven range is the requested range and the result is complete.
 func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query FilterQuery, prove bool) ([]*types.Log, common.Range[uint64], *QueryProof, error) {
+	if query.Pattern == nil {
+		return nil, common.Range[uint64]{}, nil, errors.New("missing query pattern")
+	}
+	if query.Limit == 0 {
+		return nil, common.Range[uint64]{}, nil, errors.New("zero result limit")
+	}
 	headBlock := chainView.HeadNumber()
 	refHeader := chainView.Header(headBlock)
 	refBlockHash := refHeader.Hash()
-	firstBlock := min(query.FirstBlock, headBlock)
+	firstBlock := query.FirstBlock
 	lastBlock := min(query.LastBlock, headBlock)
+	if firstBlock > lastBlock {
+		return nil, common.Range[uint64]{}, nil, errors.New("empty block range")
+	}
 	blockRange := common.NewRange[uint64](firstBlock, lastBlock+1-firstBlock)
 	readerRange := blockRange
 	if prove && lastBlock < headBlock {
@@ -136,95 +151,76 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		}
 		return readers[i].BlockRange().First() < readers[j].BlockRange().First()
 	})
-	for i := 1; i < len(readers); i++ {
-		// check if the available tables cover a continuous range
-		var cont bool
-		if query.LimitLatest {
-			cont = readers[i].BlockRange().AfterLast() == readers[i-1].BlockRange().First()
-		} else {
-			cont = readers[i-1].BlockRange().AfterLast() == readers[i].BlockRange().First()
-		}
-		if !cont {
-			readers = readers[:i] // drop tables after a gap/overlap
-			break
-		}
+	if err := checkCoverage(readers, query.LimitLatest, blockRange); err != nil {
+		return nil, common.Range[uint64]{}, nil, err
 	}
 	maxResults := math.MaxInt
 	if query.Limit < uint64(math.MaxInt) {
 		maxResults = int(query.Limit)
 	}
 	var (
-		allLogs     []*types.Log
-		provers     []*tableProver
-		resultFirst = uint64(math.MaxUint64)
-		resultLast  uint64
-		// the tables past the query range carry no results but must be part of
-		// the proof: they chain the covered block entries up to the head
+		allLogs []*types.Log // in scan order
+		provers []*tableProver
+		// the tables outside the scanned part carry no results but must be part
+		// of the proof: they chain the covered block entries up to the head
 		tailProvers []*tableProver
+		limited     bool   // the result limit was reached
+		cutBlock    uint64 // the block the limit was reached in
 	)
 	for _, tr := range readers {
+		var prover *tableProver
+		if prove {
+			prover = newTableProver(tr)
+		}
 		br := tr.BlockRange().Intersection(blockRange)
-		prover := newTableProver(tr)
 		if br.IsEmpty() {
 			if prove {
 				tailProvers = append(tailProvers, prover)
 			}
 			continue
 		}
-		firstPos := types.IndexPosition{BlockNumber: br.First()}
-		lastPos := types.IndexPosition{BlockNumber: br.Last(), TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
-		tableFirst, tableLast := br.First(), br.Last()
-		if query.LimitLatest {
-			firstPos, lastPos = lastPos, firstPos
-			tableFirst, tableLast = tableLast, tableFirst
+		if limited {
+			// past the cut: older tables are not needed at all, newer ones
+			// only anchor the proof to the reference head
+			if prove && !query.LimitLatest {
+				tailProvers = append(tailProvers, prover)
+			}
+			continue
 		}
-		instance := query.Pattern.newInstance(
-			ctx,
-			&directionalReader{reader: tr, reverse: query.LimitLatest},
-			firstPos,
-			lastPos,
-		)
 		mp := &matcherProcess{
-			logIndex:    mc.logIndex,
 			chainView:   chainView,
-			matcher:     instance,
-			tableReader: tr,
+			reader:      tr,
 			prover:      prover,
-			firstBlock:  tableFirst,
-			lastBlock:   tableLast,
+			pattern:     query.Pattern,
+			reverse:     query.LimitLatest,
 			blockProofs: make(map[uint64]*blockProof),
 		}
-		count, err := mp.run(ctx, maxResults-len(allLogs))
+		begin := types.IndexPosition{BlockNumber: br.First()}
+		end := types.IndexPosition{BlockNumber: br.Last(), TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
+		cut, err := mp.scan(ctx, query.Pattern, begin, end, maxResults-len(allLogs))
 		if err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
-		scanFirst, scanLast := firstPos, lastPos
+		if prover != nil {
+			prover.addBlockProofs(mp.blockProofs, len(mp.matches))
+		}
+		allLogs = append(allLogs, mp.matches...)
+		if prove {
+			provers = append(provers, prover)
+		}
+		if cut != nil {
+			limited, cutBlock = true, *cut
+		}
+	}
+	if len(allLogs) > maxResults {
+		allLogs = allLogs[:maxResults]
+	}
+	provenFirst, provenLast := firstBlock, lastBlock
+	if limited {
 		if query.LimitLatest {
-			scanFirst, scanLast = lastPos, firstPos
-		}
-		if err := mp.prover.proveValueEntries(query.Pattern.proofValues(), scanFirst, scanLast); err != nil {
-			return nil, common.Range[uint64]{}, nil, err
-		}
-		mp.prover.addBlockProofs(mp.blockProofs, count)
-		allLogs = append(allLogs, mp.allMatches...)
-		provers = append(provers, prover)
-		if count > 0 {
-			if query.LimitLatest {
-				if resultFirst == math.MaxUint64 {
-					resultFirst = tableFirst
-				}
-				resultLast = tableLast
-			} else {
-				if resultFirst == math.MaxUint64 {
-					resultFirst = mp.firstResultBlock
-				}
-				resultLast = mp.lastResultBlock
-			}
-		}
-		if len(allLogs) >= maxResults && !prove {
-			// when proving, the remaining tables are still needed: they chain
-			// the covered block entries up to the reference head
-			break
+			provenFirst = cutBlock
+		} else {
+			provenLast = cutBlock
 		}
 	}
 	if query.LimitLatest {
@@ -232,192 +228,262 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 		for i := 0; i < last-i; i++ {
 			allLogs[i], allLogs[last-i] = allLogs[last-i], allLogs[i]
 		}
-		resultFirst, resultLast = resultLast, resultFirst
-		// reverse the prover order for the proof assembly
+		// the provers were collected newest first
 		last = len(provers) - 1
 		for i := 0; i < last-i; i++ {
 			provers[i], provers[last-i] = provers[last-i], provers[i]
 		}
 	}
+	var proof *QueryProof
 	if prove {
-		// the tail tables chain the proof up to the reference head: append
-		// them in ascending range order after the scanned provers
+		// the tail tables follow the scanned ones in ascending range order
 		sort.Slice(tailProvers, func(i, j int) bool {
 			return tailProvers[i].reader.BlockRange().First() < tailProvers[j].reader.BlockRange().First()
 		})
 		provers = append(provers, tailProvers...)
-	}
-	if resultFirst == math.MaxUint64 {
-		resultFirst, resultLast = firstBlock, lastBlock
-	}
-	var proof *QueryProof
-	if prove {
 		var err error
-		if proof, err = makeQueryProof(refHeader, &query, resultFirst, resultLast, mc.contractProverBackend, provers); err != nil {
+		if proof, err = makeQueryProof(refHeader, &query, provenFirst, provenLast, mc.contractProverBackend, provers); err != nil {
 			return nil, common.Range[uint64]{}, nil, err
 		}
 	}
-	return allLogs, common.NewRange[uint64](resultFirst, resultLast+1-resultFirst), proof, nil
+	return allLogs, common.NewRange[uint64](provenFirst, provenLast+1-provenFirst), proof, nil
 }
 
-// matcherProcess walks one index table with the query's matcher instance,
-// collecting the matching logs and the proof material of the blocks and
+// checkCoverage verifies that the readers, sorted in scan order, form one
+// continuous range that contains the requested range.
+func checkCoverage(readers []*logindex.TableReader, reverse bool, want common.Range[uint64]) error {
+	var covered common.RangeSet[uint64]
+	for i, tr := range readers {
+		if i > 0 {
+			prev := readers[i-1].BlockRange()
+			if reverse && prev.First() != tr.BlockRange().AfterLast() || !reverse && prev.AfterLast() != tr.BlockRange().First() {
+				return errors.New("required block range is not indexed")
+			}
+		}
+		covered = covered.Union(common.SingleRangeSet[uint64](tr.BlockRange()))
+	}
+	if !common.SingleRangeSet[uint64](want).Difference(covered).IsEmpty() {
+		return errors.New("required block range is not indexed")
+	}
+	return nil
+}
+
+// readerSource implements runSource over a table reader. When recording it
+// notes the table indices of the entries a run is made of together with its
+// two bounding neighbors: exactly the entries a proof needs to show the run
+// complete.
+type readerSource struct {
+	ctx     context.Context
+	reader  *logindex.TableReader
+	record  bool
+	touched []uint64
+	err     error
+}
+
+func (rs *readerSource) valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool) {
+	if rs.err != nil {
+		return nil, false
+	}
+	start, _, err := rs.reader.SeekEntry(valueBoundary(typ, content, begin))
+	if err != nil {
+		rs.err = err
+		return nil, false
+	}
+	high := valueBoundary(typ, content, end)
+	var (
+		run indexPositionSet
+		i   = start
+	)
+	for ; i < rs.reader.EntryCount; i++ {
+		if i%1024 == 0 {
+			if err := rs.ctx.Err(); err != nil {
+				rs.err = err
+				return nil, false
+			}
+		}
+		entry, err := rs.reader.GetEntry(i)
+		if err != nil {
+			rs.err = err
+			return nil, false
+		}
+		if types.CompareEntries(entry, high) > 0 {
+			break
+		}
+		pos, err := types.PositionFromEntry(entry)
+		if err != nil {
+			rs.err = err
+			return nil, false
+		}
+		run = append(run, pos)
+	}
+	if rs.record {
+		if start > 0 {
+			rs.touched = append(rs.touched, start-1)
+		}
+		for j := start; j < i; j++ {
+			rs.touched = append(rs.touched, j)
+		}
+		if i < rs.reader.EntryCount {
+			rs.touched = append(rs.touched, i)
+		}
+	}
+	return run, true
+}
+
+// matcherProcess evaluates a pattern on one index table: it derives the
+// candidate positions from the table's entry runs, loads the block data of the
+// candidates and, when proving, collects the proof material of the blocks and
 // transactions they point to.
 type matcherProcess struct {
-	logIndex    logIndex
-	chainView   ChainView
-	matcher     matcherInstance
-	tableReader *logindex.TableReader
-	prover      *tableProver
-	firstBlock  uint64
-	lastBlock   uint64
+	chainView ChainView
+	reader    *logindex.TableReader
+	prover    *tableProver
+	pattern   PatternMatcher
+	reverse   bool
 
-	allMatches       []*types.Log
-	blockProofs      map[uint64]*blockProof
-	lastHeader       *types.Header
-	lastBody         *types.Body
-	lastReceipts     types.Receipts
-	lastBlockProof   *blockProof
-	firstResultBlock uint64
-	lastResultBlock  uint64
+	matches        []*types.Log // matching logs in scan order
+	blockProofs    map[uint64]*blockProof
+	curHeader      *types.Header
+	curBody        *types.Body
+	curReceipts    types.Receipts
+	curBlockProof  *blockProof
+	curLogsOffsets []uint32 // block-global log index of each transaction's first log
 }
 
-// run iterates the matcher until it is exhausted or the result limit is
-// reached, returning the number of new matches.
-func (mp *matcherProcess) run(ctx context.Context, remaining int) (int, error) {
-	count := 0
-	for count < remaining {
-		select {
-		case <-ctx.Done():
-			return count, ctx.Err()
-		default:
+// scan evaluates the pattern on the table between begin and end. It stops
+// after the block in which the number of matches reaches limit has been fully
+// processed and returns that block number, or nil if the limit was not
+// reached.
+func (mp *matcherProcess) scan(ctx context.Context, pattern PatternMatcher, begin, end types.IndexPosition, limit int) (*uint64, error) {
+	src := &readerSource{ctx: ctx, reader: mp.reader, record: mp.prover != nil}
+	candidates, ok := pattern.candidates(src, begin, end)
+	if src.err != nil {
+		return nil, src.err
+	}
+	if !ok {
+		return nil, errors.New("the pattern cannot be evaluated on the index")
+	}
+	var cut *uint64
+	for n := range candidates {
+		pos := candidates[n]
+		if mp.reverse {
+			pos = candidates[len(candidates)-1-n]
 		}
-		pos, err := mp.matcher.next()
+		if cut != nil && pos.BlockNumber != *cut {
+			break
+		}
+		if n%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		matched, err := mp.processCandidate(pos)
 		if err != nil {
-			return count, err
+			return nil, err
 		}
-		if pos == nil {
-			return count, mp.finish()
-		}
-		if err := mp.addMatch(pos); err != nil {
-			return count, err
-		}
-		count++
-		if mp.firstResultBlock == 0 || pos.BlockNumber < mp.firstResultBlock {
-			mp.firstResultBlock = pos.BlockNumber
-		}
-		if pos.BlockNumber > mp.lastResultBlock {
-			mp.lastResultBlock = pos.BlockNumber
-		}
-		if err := mp.matcher.advance(nil); err != nil {
-			return count, err
+		if matched && cut == nil && len(mp.matches) >= limit {
+			block := pos.BlockNumber
+			cut = &block
 		}
 	}
-	return count, mp.finish()
-}
-
-// finish flushes the pending block proof of the last matched block.
-func (mp *matcherProcess) finish() error {
-	if mp.lastHeader == nil {
-		return nil
+	if err := mp.finishBlock(); err != nil {
+		return nil, err
 	}
-	return mp.finalizeLastMatchBlock()
+	if mp.prover != nil {
+		touched := src.touched
+		if cut != nil {
+			// only the part of the table up to the cut block is proven: record
+			// the entries of that shorter range instead
+			cutBegin, cutEnd := begin, end
+			if mp.reverse {
+				cutBegin = types.IndexPosition{BlockNumber: *cut}
+			} else {
+				cutEnd = types.IndexPosition{BlockNumber: *cut, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
+			}
+			cutSrc := &readerSource{ctx: ctx, reader: mp.reader, record: true}
+			pattern.candidates(cutSrc, cutBegin, cutEnd)
+			if cutSrc.err != nil {
+				return nil, cutSrc.err
+			}
+			touched = cutSrc.touched
+		}
+		mp.prover.valueEntries = touched
+	}
+	return cut, nil
 }
 
-// updateLastMatchBlock loads the chain data of the match's block and
-// initializes its block proof when proving.
-func (mp *matcherProcess) updateLastMatchBlock(number uint64) error {
-	if mp.lastHeader != nil {
-		if mp.lastHeader.Number.Uint64() == number {
+// loadBlock loads the chain data of the block of a candidate and initializes
+// its block proof when proving.
+func (mp *matcherProcess) loadBlock(number uint64) error {
+	if mp.curHeader != nil {
+		if mp.curHeader.Number.Uint64() == number {
 			return nil
 		}
-		if err := mp.finalizeLastMatchBlock(); err != nil {
+		if err := mp.finishBlock(); err != nil {
 			return err
 		}
 	}
-	if mp.lastHeader = mp.chainView.Header(number); mp.lastHeader == nil {
+	header := mp.chainView.Header(number)
+	if header == nil {
 		return errors.New("header of block #" + itoa(number) + " not found")
 	}
-	if mp.lastBody = mp.chainView.Body(number); mp.lastBody == nil {
+	body := mp.chainView.Body(number)
+	if body == nil {
 		return errors.New("body of block #" + itoa(number) + " not found")
 	}
-	if mp.lastReceipts = mp.chainView.RawReceipts(number); mp.lastReceipts == nil {
+	receipts := mp.chainView.RawReceipts(number)
+	if receipts == nil {
 		return errors.New("receipts of block #" + itoa(number) + " not found")
 	}
+	if len(receipts) != len(body.Transactions) {
+		return errors.New("receipt count of block #" + itoa(number) + " does not match its transactions")
+	}
+	if err := receipts.DeriveFields(mp.chainConfig(), header.Hash(), number, header.Time, header.BaseFee, nil, body.Transactions); err != nil {
+		return err
+	}
+	mp.curHeader, mp.curBody, mp.curReceipts = header, body, receipts
+	mp.curLogsOffsets = make([]uint32, len(receipts))
+	var offset uint32
+	for i, receipt := range receipts {
+		mp.curLogsOffsets[i] = offset
+		offset += uint32(len(receipt.Logs))
+	}
 	if mp.prover != nil {
-		// result found in a block that is not proven yet; initialize new block proof
-		if number == mp.tableReader.BlockRange().Last() {
-			mp.lastBlockProof = newBlockProof(mp.lastHeader, math.MaxUint64)
+		// candidate in a block that is not proven yet; initialize its block proof
+		if number == mp.reader.BlockRange().Last() {
+			mp.curBlockProof = newBlockProof(header, math.MaxUint64)
 		} else {
-			blockEntry := types.EncodeEntry(types.EntryTypeBlock, mp.lastHeader.Hash().Bytes(), number, 0, 0)
-			blockEntryIndex, found, err := mp.tableReader.SeekEntry(blockEntry)
+			blockEntry := types.EncodeEntry(types.EntryTypeBlock, header.Hash().Bytes(), number, 0, 0)
+			blockEntryIndex, found, err := mp.reader.SeekEntry(blockEntry)
 			if err != nil {
 				return err
 			}
 			if !found {
 				return errors.New("could not find block entry index")
 			}
-			mp.lastBlockProof = newBlockProof(mp.lastHeader, blockEntryIndex)
+			mp.curBlockProof = newBlockProof(header, blockEntryIndex)
 		}
 	}
 	return nil
 }
 
-// finalizeLastMatchBlock derives the pending block's receipt fields, proves
-// the index entries of every claimed transaction's logs and records the block
-// proof.
-func (mp *matcherProcess) finalizeLastMatchBlock() error {
-	if mp.lastHeader == nil {
+// finishBlock records the receipts proof of the pending block.
+func (mp *matcherProcess) finishBlock() error {
+	if mp.curHeader == nil {
 		return nil
 	}
-	header, body, receipts := mp.lastHeader, mp.lastBody, mp.lastReceipts
-	if err := receipts.DeriveFields(mp.chainConfig(), header.Hash(), header.Number.Uint64(), header.Time, header.BaseFee, nil, body.Transactions); err != nil {
-		return err
+	if mp.curBlockProof != nil {
+		mp.curBlockProof.createProof(mp.curReceipts)
+		mp.blockProofs[mp.curHeader.Number.Uint64()] = mp.curBlockProof
+		mp.curBlockProof = nil
 	}
-	if mp.lastBlockProof != nil {
-		// every log of every claimed transaction needs its address and topic
-		// entries proven: the verifier's exclusion cross-check reconstructs
-		// the potential match set from the proven entries, and an unproven
-		// entry between two proven ones would wrongly cover the log
-		// positions around it
-		blockNumber := header.Number.Uint64()
-		for txi, mtx := range mp.lastBlockProof.matchingTxs {
-			for logIdx, log := range receipts[txi].Logs {
-				addressEntry := types.EncodeEntry(types.EntryTypeLogAddress, log.Address[:], blockNumber, txi, uint32(logIdx))
-				mp.appendLogEntry(&mtx, addressEntry)
-				for topicIdx, topic := range log.Topics {
-					if topicIdx >= logindex.MaxTopicCount {
-						break
-					}
-					topicEntry := types.EncodeEntry(types.EntryTypeLogTopic0+types.EntryType(topicIdx), topic[:], blockNumber, txi, uint32(logIdx))
-					mp.appendLogEntry(&mtx, topicEntry)
-				}
-			}
-			mp.lastBlockProof.matchingTxs[txi] = mtx
-		}
-		mp.lastBlockProof.createProof(receipts)
-		mp.blockProofs[header.Number.Uint64()] = mp.lastBlockProof
-		mp.lastBlockProof = nil
-	}
-	mp.lastHeader, mp.lastBody, mp.lastReceipts = nil, nil, nil
+	mp.curHeader, mp.curBody, mp.curReceipts, mp.curLogsOffsets = nil, nil, nil, nil
 	return nil
 }
 
-// appendLogEntry looks up a log's index entry and records it in the
-// transaction's proof material.
-func (mp *matcherProcess) appendLogEntry(mtx *matchingTx, entry types.IndexEntry) {
-	entryIndex, found, err := mp.tableReader.SeekEntry(entry)
-	if err != nil {
-		return
-	}
-	if found {
-		mtx.logEntries = append(mtx.logEntries, entryIndex)
-	}
-}
-
-// chainConfig returns the chain config of the first proven block's context;
-// receipt derivation needs it only for blob fee computation, which is nil
-// here (DeriveFields recomputes log block fields, not gas prices).
+// chainConfig returns the chain config used to derive the receipt fields;
+// derivation needs it only for blob fee computation, which is nil here (the
+// derived log fields do not depend on gas prices).
 func (mp *matcherProcess) chainConfig() *params.ChainConfig {
 	return params.MainnetChainConfig
 }
@@ -426,54 +492,57 @@ func itoa(n uint64) string {
 	return strconv.FormatUint(n, 10)
 }
 
-// addMatch records a matching log, building its full log structure from the
-// block data and registering the block and transaction proof entries.
-func (mp *matcherProcess) addMatch(pos *types.IndexPosition) error {
-	if err := mp.updateLastMatchBlock(pos.BlockNumber); err != nil {
-		return err
+// processCandidate loads the candidate's transaction, registers its proof
+// material and records the log if it matches the pattern. A candidate whose
+// log index lies beyond the receipt's logs (a position derived through an
+// offset matcher) matches nothing, but its transaction is still proven.
+func (mp *matcherProcess) processCandidate(pos types.IndexPosition) (bool, error) {
+	if err := mp.loadBlock(pos.BlockNumber); err != nil {
+		return false, err
 	}
-	header, body, receipts := mp.lastHeader, mp.lastBody, mp.lastReceipts
-	if pos.TxIndex >= uint32(len(body.Transactions)) {
-		return errors.New("transaction index out of range")
+	if int(pos.TxIndex) >= len(mp.curReceipts) {
+		return false, errors.New("transaction index out of range")
 	}
-	txHash := body.Transactions[pos.TxIndex].Hash()
-	if pos.TxIndex >= uint32(len(receipts)) {
-		return errors.New("receipt index out of range")
-	}
-	receipt := receipts[pos.TxIndex]
-	if pos.LogIndex >= uint32(len(receipt.Logs)) {
-		return errors.New("log index out of range")
-	}
-	log := receipt.Logs[pos.LogIndex]
-	var logOffset uint32
-	for i := uint32(0); i < pos.TxIndex; i++ {
-		logOffset += uint32(len(receipts[i].Logs))
-	}
-	mp.allMatches = append(mp.allMatches, &types.Log{
-		Address:        log.Address,
-		Topics:         log.Topics,
-		Data:           log.Data,
-		BlockNumber:    pos.BlockNumber,
-		TxHash:         txHash,
-		TxIndex:        uint(pos.TxIndex),
-		BlockHash:      header.Hash(),
-		BlockTimestamp: header.Time,
-		Index:          uint(logOffset) + uint(pos.LogIndex),
-	})
+	receipt := mp.curReceipts[pos.TxIndex]
 	if mp.prover != nil {
-		blockProof := mp.lastBlockProof
+		blockProof := mp.curBlockProof
 		if _, ok := blockProof.matchingTxs[pos.TxIndex]; !ok {
-			// result found in a transaction that is not proven yet; initialize new transaction proof
-			txEntry := types.EncodeEntry(types.EntryTypeTransaction, txHash[:], pos.BlockNumber, pos.TxIndex, uint32(logOffset))
-			txEntryIndex, found, err := mp.tableReader.SeekEntry(txEntry)
+			// candidate in a transaction that is not proven yet; initialize its proof
+			txEntry := types.EncodeEntry(types.EntryTypeTransaction, receipt.TxHash[:], pos.BlockNumber, pos.TxIndex, mp.curLogsOffsets[pos.TxIndex])
+			txEntryIndex, found, err := mp.reader.SeekEntry(txEntry)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !found {
-				return errors.New("could not find transaction entry index at block " + itoa(pos.BlockNumber) + " tx " + itoa(uint64(pos.TxIndex)))
+				return false, errors.New("could not find transaction entry index at block " + itoa(pos.BlockNumber) + " tx " + itoa(uint64(pos.TxIndex)))
 			}
 			blockProof.matchingTxs[pos.TxIndex] = matchingTx{txEntryIndex: txEntryIndex}
 		}
 	}
-	return nil
+	// the pattern is evaluated on the receipt's logs exactly as the verifier
+	// evaluates it on the proven receipt
+	if int(pos.LogIndex) >= len(receipt.Logs) {
+		return false, nil
+	}
+	return mp.recordMatch(pos, receipt), nil
+}
+
+// recordMatch appends the log at the position to the matches if it matches.
+func (mp *matcherProcess) recordMatch(pos types.IndexPosition, receipt *types.Receipt) bool {
+	if !mp.pattern.matchLogs(receipt.Logs, int(pos.LogIndex)) {
+		return false
+	}
+	log := receipt.Logs[pos.LogIndex]
+	mp.matches = append(mp.matches, &types.Log{
+		Address:        log.Address,
+		Topics:         log.Topics,
+		Data:           log.Data,
+		BlockNumber:    pos.BlockNumber,
+		TxHash:         receipt.TxHash,
+		TxIndex:        uint(pos.TxIndex),
+		BlockHash:      mp.curHeader.Hash(),
+		BlockTimestamp: mp.curHeader.Time,
+		Index:          uint(mp.curLogsOffsets[pos.TxIndex]) + uint(pos.LogIndex),
+	})
+	return true
 }

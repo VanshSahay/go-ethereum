@@ -17,7 +17,6 @@
 package logquery
 
 import (
-	"errors"
 	"slices"
 	"sort"
 
@@ -75,17 +74,8 @@ func (p *QueryProof) addOrGetIndexContract(contract common.Address) uint32 {
 	return uint32(len(p.IndexContracts) - 1)
 }
 
-// indexPositionSet is an exact, sorted set of index positions. The prover
-// proves every entry of the searched values in the scanned range, so the set
-// reconstructed by the verifier is complete and the exclusion cross-check is
-// exact.
+// indexPositionSet is a sorted set of index positions without duplicates.
 type indexPositionSet []types.IndexPosition
-
-// contains tells whether the given position is in the set.
-func (ips indexPositionSet) contains(p types.IndexPosition) bool {
-	i := sort.Search(len(ips), func(i int) bool { return ips[i].Compare(p) >= 0 })
-	return i < len(ips) && ips[i] == p
-}
 
 // ipsUnion returns the union of the sorted sets.
 func ipsUnion(sets []indexPositionSet) indexPositionSet {
@@ -101,11 +91,6 @@ func ipsUnion(sets []indexPositionSet) indexPositionSet {
 func ipsIntersection(sets []indexPositionSet) indexPositionSet {
 	if len(sets) == 0 {
 		return nil
-	}
-	for _, set := range sets {
-		if len(set) == 0 {
-			return nil
-		}
 	}
 	out := sets[0]
 	for _, set := range sets[1:] {
@@ -128,57 +113,61 @@ func ipsIntersection(sets []indexPositionSet) indexPositionSet {
 	return out
 }
 
-// excludeBefore tells whether the entry positions before the given proven
-// entry index are proven to not match the entry's (type, content) pair: a gap
-// in the proven index list means the prover paid for a multiproof over a
-// range that is claimed to contain no matching entries.
-func (tqp *tableQueryProof) excludeBefore(i int) bool {
-	// positions past the last proven entry are covered by the tail
-	// multiproof (iterateProofIndices to MaxUint64), so no gap there
-	if i <= 0 || i >= len(tqp.EntryIndices) {
-		return false
-	}
-	return tqp.EntryIndices[i] != tqp.EntryIndices[i-1]+1
-}
-
-// valueBoundary builds the sorted-entries boundary lookup key for the given
-// (type, content) pair at position p: the entry's raw encoding with the
-// position fields set to p.
+// valueBoundary builds the sorted-entries lookup key for the given (type,
+// content) pair at position p: the entry's raw encoding with the position
+// fields set to p.
 func valueBoundary(typ uint32, content []byte, p types.IndexPosition) types.IndexEntry {
 	return types.EncodeEntry(types.EntryType(typ), content, p.BlockNumber, p.TxIndex, p.LogIndex)
 }
 
-// findValueRange binary searches the sorted proven entries for the half-open
-// entry index range covered by (type, content) within [begin, end].
-func (tqp *tableQueryProof) findValueRange(typ uint32, content []byte, begin, end types.IndexPosition) (int, int) {
-	first, _ := findInEntries(tqp.ProvenEntries, valueBoundary(typ, content, begin))
-	afterLast, _ := findInEntries(tqp.ProvenEntries, valueBoundary(typ, content, end))
-	return first, afterLast
-}
-
-// getValueMatches computes the index position set that the proven entries
-// imply for the given (type, content) matcher within [begin, end]: the exact
-// positions of every proven value entry. The prover proves all entries of the
-// searched values in the scanned range, so within it this set is complete and
-// the exclusion cross-check is exact; outside the scanned range no proven
-// receipt constrains the set.
-func (tqp *tableQueryProof) getValueMatches(typ uint32, content []byte, begin, end types.IndexPosition) indexPositionSet {
-	firstInRange, afterLastInRange := tqp.findValueRange(typ, content, begin, end)
-	ips := make(indexPositionSet, 0, afterLastInRange-firstInRange)
-	for i := firstInRange; i < afterLastInRange; i++ {
-		ips = append(ips, mustPosition(tqp.ProvenEntries[i]))
+// valueRun implements runSource over the proven entries of the table proof. It
+// returns the positions of the entries of the given (type, content) pair within
+// [begin, end] and reports whether the proof shows that run to be complete:
+//
+//   - the proven entries inside the range must sit at consecutive table
+//     indices, so no entry of the run can hide between two proven ones;
+//   - the run must be bounded on both sides by a proven entry outside the
+//     range at the adjacent table index, or by the start or end of the table.
+//
+// An empty run is shown the same way, by two adjacent proven entries (or a
+// table edge) that enclose the range.
+func (tqp *tableQueryProof) valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool) {
+	n := len(tqp.ProvenEntries)
+	if n == 0 {
+		return nil, tqp.EntryCount == 0
 	}
-	return ips
-}
-
-// mustPosition decodes the position of an entry, panicking on malformed
-// input: proven entries always originate from the indexer's own tables.
-func mustPosition(entry types.IndexEntry) types.IndexPosition {
-	pos, err := types.PositionFromEntry(entry)
-	if err != nil {
-		panic("malformed index entry: " + err.Error())
+	if tqp.EntryIndices[n-1] >= tqp.EntryCount {
+		return nil, false
 	}
-	return pos
+	low := valueBoundary(typ, content, begin)
+	high := valueBoundary(typ, content, end)
+	// s is the first proven slot at or after the range, e the first one
+	// beyond it
+	s, _ := findInEntries(tqp.ProvenEntries, low)
+	e := s + sort.Search(n-s, func(i int) bool {
+		return types.CompareEntries(tqp.ProvenEntries[s+i], high) > 0
+	})
+	// the window from the left bounding slot to the right bounding slot must
+	// be contiguous in the table
+	a, b := max(s-1, 0), min(e, n-1)
+	for i := a; i < b; i++ {
+		if tqp.EntryIndices[i+1] != tqp.EntryIndices[i]+1 {
+			return nil, false
+		}
+	}
+	if s == 0 && tqp.EntryIndices[0] != 0 {
+		return nil, false
+	}
+	if e == n && tqp.EntryIndices[n-1] != tqp.EntryCount-1 {
+		return nil, false
+	}
+	run := make(indexPositionSet, 0, e-s)
+	for i := s; i < e; i++ {
+		pos, err := types.PositionFromEntry(tqp.ProvenEntries[i])
+		if err != nil {
+			return nil, false
+		}
+		run = append(run, pos)
+	}
+	return run, true
 }
-
-var errNoSuccessor = errors.New("no valid position after the given one")

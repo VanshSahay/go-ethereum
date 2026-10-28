@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -192,13 +193,21 @@ func TestPatternJSONRoundTrip(t *testing.T) {
 	if _, err := json.Marshal(m2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewPatternMatcherFromJSON(json.RawMessage(`{"anyOf":[{"field":"address","value":"0x01"},{"field":"topics[0]","value":"0x02"}]}`)); err != nil {
+	const addr = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+	if _, err := NewPatternMatcherFromJSON(json.RawMessage(`{"anyOf":[{"field":"address","value":"` + addr + `"},{"field":"topics[0]","value":"0x02"}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewPatternMatcherFromJSON(json.RawMessage(`{"allOf":[{"field":"address","value":"0x01"},{"offset":{"field":"topics[0]","value":"0x02"},"amount":1}]}`)); err != nil {
+	if _, err := NewPatternMatcherFromJSON(json.RawMessage(`{"allOf":[{"field":"address","value":"` + addr + `"},{"offset":{"field":"topics[0]","value":"0x02"},"amount":1}]}`)); err != nil {
 		t.Fatal(err)
 	}
+	nested := strings.Repeat(`{"anyOf":[`, maxPatternDepth+2) + `{"field":"topics[0]","value":"0x02"}` + strings.Repeat(`]}`, maxPatternDepth+2)
 	for _, bad := range []json.RawMessage{
+		json.RawMessage(nested),                               // nested too deeply
+		json.RawMessage(`{"field":"address","value":"0x01"}`), // short address
+		json.RawMessage(`{"field":"address","value":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2aa"}`), // 21 byte address
+		json.RawMessage(`{"field":"block","value":"0x01"}`),                                           // unsupported field
+		json.RawMessage(`{"field":"transaction","value":"0x01"}`),                                     // unsupported field
+		json.RawMessage(`{"offset":{"field":"topics[0]","value":"0x02"},"amount":4294967296}`),        // offset out of range
 		json.RawMessage(`{}`),                                   // empty
 		json.RawMessage(`{"field":"address"}`),                  // value missing
 		json.RawMessage(`{"field":"unknown","value":"0x01"}`),   // bad field
@@ -263,8 +272,9 @@ func TestMatcherVsBruteForce(t *testing.T) {
 					want[i].BlockNumber, want[i].TxIndex, want[i].Index)
 			}
 		}
-		if len(logs) > 0 && resultRange.First() != want[0].BlockNumber {
-			t.Errorf("%s: result range starts at %d, want %d", tt.name, resultRange.First(), want[0].BlockNumber)
+		// no limit was reached, so the proven range is the requested one
+		if resultRange.First() != 1 || resultRange.Last() != uint64(tc.blocks) {
+			t.Errorf("%s: proven range %v, want [1..%d]", tt.name, resultRange, tc.blocks)
 		}
 	}
 }

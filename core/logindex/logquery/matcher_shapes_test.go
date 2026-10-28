@@ -120,17 +120,14 @@ func TestMatcherManyTxsOneBlock(t *testing.T) {
 	ix := newMemoryIndexerForTest()
 	for i := 1; i <= 6; i++ {
 		txs := tc.bodies[i].Transactions
-		if i != 3 {
-			continue
-		}
 		receipts := make(types.Receipts, len(txs))
 		for j := range txs {
-			receipts[j] = &types.Receipt{
-				TxHash: txs[j].Hash(),
-				Logs: []*types.Log{
+			receipts[j] = &types.Receipt{TxHash: txs[j].Hash()}
+			if i == 3 {
+				receipts[j].Logs = []*types.Log{
 					{Address: testWETH, Topics: []common.Hash{tA}},
 					{Address: testWETH, Topics: []common.Hash{tB}},
-				},
+				}
 			}
 		}
 		tc.receipts[i] = receipts

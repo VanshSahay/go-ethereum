@@ -19,6 +19,8 @@ package logquery
 import (
 	"context"
 	"encoding/json"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,6 +31,7 @@ import (
 // advFixture is an honest proof over the round-trip chain together with the
 // trust anchors a verifier would hold.
 type advFixture struct {
+	rtc     *rtChain
 	trusted *types.Header
 	req     FilterQuery
 	opts    VerifyOptions
@@ -54,6 +57,7 @@ func newAdvFixture(t *testing.T) *advFixture {
 		t.Fatal(err)
 	}
 	return &advFixture{
+		rtc:     rtc,
 		trusted: rtc.bc.CurrentBlock(),
 		req:     req,
 		opts:    DefaultVerifyOptions(rtc.bc.Config()),
@@ -196,5 +200,148 @@ func TestAdversarialIndexContract(t *testing.T) {
 		last := &p.TableQueryProofs[len(p.TableQueryProofs)-1]
 		last.FirstBlock += 1024
 		last.TableSize = 1
+	})
+}
+
+// reader returns the index table a table proof was made from.
+func (f *advFixture) reader(t *testing.T, tqp *tableQueryProof) *tableProver {
+	t.Helper()
+	for _, tr := range f.rtc.bc.LogIndex().GetRangeReaders(f.trusted.Hash(), common.NewRange[uint64](tqp.FirstBlock, tqp.TableSize), 0) {
+		if br := tr.BlockRange(); br.First() == tqp.FirstBlock && br.Count() == tqp.TableSize {
+			return newTableProver(tr)
+		}
+	}
+	t.Fatalf("table [%d, %d) not found", tqp.FirstBlock, tqp.TableSize)
+	return nil
+}
+
+// rebuild replaces the proven entries of a table proof with the ones selected
+// by keep and re-derives a valid multiproof for them from the real table, as a
+// prover that wants to hide entries would.
+func (f *advFixture) rebuild(t *testing.T, tqp *tableQueryProof, keep func(i int, entry types.IndexEntry) bool) {
+	t.Helper()
+	tp := f.reader(t, tqp)
+	var (
+		indices []uint64
+		entries []types.IndexEntry
+		hashes  []common.Hash
+		last    = uint64(math.MaxUint64)
+		err     error
+	)
+	for i, entry := range tqp.ProvenEntries {
+		if !keep(i, entry) {
+			continue
+		}
+		idx := tqp.EntryIndices[i]
+		if hashes, err = tp.makeProofHashes(hashes, last, idx); err != nil {
+			t.Fatal(err)
+		}
+		indices, entries, last = append(indices, idx), append(entries, entry), idx
+	}
+	if hashes, err = tp.makeProofHashes(hashes, last, math.MaxUint64); err != nil {
+		t.Fatal(err)
+	}
+	tqp.EntryIndices, tqp.ProvenEntries, tqp.ProofHashes = indices, entries, hashes
+}
+
+// resultTable returns the index of the first table proof with block results.
+func resultTable(t *testing.T, p *QueryProof) int {
+	t.Helper()
+	for i := range p.TableQueryProofs {
+		if len(p.TableQueryProofs[i].BlockResults) > 0 {
+			return i
+		}
+	}
+	t.Fatal("no table with results")
+	return 0
+}
+
+// TestAdversarialOmission pins the completeness of the results: a prover that
+// leaves out receipts, blocks or index entries must be caught, however
+// consistently it rewrites the rest of the proof.
+func TestAdversarialOmission(t *testing.T) {
+	f := newAdvFixture(t)
+
+	f.mustReject(t, "drop every block result", func(p *QueryProof) {
+		tqp := &p.TableQueryProofs[resultTable(t, p)]
+		tqp.BlockResults, tqp.ResultCount = nil, 0
+	})
+	f.mustReject(t, "drop one block result", func(p *QueryProof) {
+		tqp := &p.TableQueryProofs[resultTable(t, p)]
+		tqp.BlockResults = tqp.BlockResults[1:]
+	})
+	f.mustReject(t, "clear the proven receipts of a block", func(p *QueryProof) {
+		tqp := &p.TableQueryProofs[resultTable(t, p)]
+		tqp.BlockResults[0].ProvenReceipts = nil
+	})
+	f.mustReject(t, "lower the result count", func(p *QueryProof) {
+		tqp := &p.TableQueryProofs[resultTable(t, p)]
+		tqp.ResultCount--
+	})
+
+	// hide the whole run of one block: drop its address entries, its block
+	// result and its results from the count, then rebuild a valid multiproof
+	// over the remaining entries
+	forge := func(t *testing.T, p *QueryProof) string {
+		tqp := &p.TableQueryProofs[resultTable(t, p)]
+		hidden := tqp.BlockResults[0].Header.Number.Uint64()
+		var dropped uint64
+		f.rebuild(t, tqp, func(i int, entry types.IndexEntry) bool {
+			typ, _, block, _, _, err := types.EntryFields(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if typ == types.EntryTypeLogAddress && block == hidden {
+				dropped++
+				return false
+			}
+			return true
+		})
+		if dropped == 0 {
+			t.Fatal("no entries to hide")
+		}
+		tqp.BlockResults = tqp.BlockResults[1:]
+		tqp.ResultCount -= dropped
+		return "hidden block"
+	}
+	func() {
+		p := f.proof(t)
+		forge(t, p)
+		_, err := p.Verify(f.trusted, f.req, f.opts)
+		if err == nil {
+			t.Error("a prover hiding a block's entries and receipts verified")
+		} else if !strings.Contains(err.Error(), "bound") {
+			t.Errorf("hidden run rejected for the wrong reason: %v", err)
+		}
+	}()
+
+	// removing single entries of a run leaves a gap or an unbounded edge
+	for name, pick := range map[string]func(addrs []int) int{
+		"first entry of the run":  func(a []int) int { return a[0] },
+		"middle entry of the run": func(a []int) int { return a[len(a)/2] },
+		"last entry of the run":   func(a []int) int { return a[len(a)-1] },
+	} {
+		f.mustReject(t, name, func(p *QueryProof) {
+			tqp := &p.TableQueryProofs[resultTable(t, p)]
+			var addrs []int
+			for i, entry := range tqp.ProvenEntries {
+				if typ, _, _, _, _, _ := types.EntryFields(entry); typ == types.EntryTypeLogAddress {
+					addrs = append(addrs, i)
+				}
+			}
+			if len(addrs) < 3 {
+				t.Skip("run too short")
+			}
+			drop := pick(addrs)
+			f.rebuild(t, tqp, func(i int, _ types.IndexEntry) bool { return i != drop })
+		})
+	}
+
+	// an empty proof of absence needs adjacent enclosing entries: claiming the
+	// table has no entries of the value at all must fail while it has some
+	f.mustReject(t, "claim an empty run", func(p *QueryProof) {
+		tqp := &p.TableQueryProofs[resultTable(t, p)]
+		f.rebuild(t, tqp, func(int, types.IndexEntry) bool { return false })
+		tqp.BlockResults, tqp.ResultCount = nil, 0
 	})
 }

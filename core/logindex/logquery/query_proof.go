@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
-	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -130,8 +129,12 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 	if p.Query.FirstBlock < first || p.Query.LastBlock > last {
 		return nil, errors.New("table proofs do not cover the query range")
 	}
+	if first0 := &p.TableQueryProofs[0]; p.Query.FirstBlock > first0.FirstBlock+first0.TableSize-1 {
+		return nil, errors.New("the first table proof lies before the query range")
+	}
 	var (
 		allLogs      []*types.Log
+		sawAnchor    bool
 		blockEntryOf = make(map[uint64]common.Hash) // block number -> proven block hash
 		nodes        = toNodeMap(p.ContractProofNodes)
 		codes        = toNodeMap(p.ContractProofCodes)
@@ -178,12 +181,17 @@ func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyO
 		if tableRoot != contractRoot {
 			return nil, errors.New("table root mismatch")
 		}
-		logs, blockHashes, _, _, err := tqp.verify(&p.Query, p.Query.FirstBlock, p.Query.LastBlock)
+		tr, err := tqp.verify(&p.Query, p.Query.FirstBlock, p.Query.LastBlock)
 		if err != nil {
 			return nil, err
 		}
-		allLogs = append(allLogs, logs...)
-		for number, hash := range blockHashes {
+		if tr.anchor {
+			sawAnchor = true
+		} else if sawAnchor {
+			return nil, errors.New("table proof inside the range follows an anchor table")
+		}
+		allLogs = append(allLogs, tr.logs...)
+		for number, hash := range tr.blocks {
 			if prev, ok := blockEntryOf[number]; ok && prev != hash {
 				return nil, errors.New("conflicting block entries")
 			}
@@ -258,6 +266,12 @@ func toNodeMap(list []hexutil.Bytes) map[common.Hash][]byte {
 	return m
 }
 
+// txKey identifies a transaction of the proven blocks.
+type txKey struct {
+	block uint64
+	tx    uint32
+}
+
 // txMeta is the proven metadata of a transaction entry: its hash and the
 // cumulative log count of the block before it.
 type txMeta struct {
@@ -265,152 +279,147 @@ type txMeta struct {
 	logOffset uint32
 }
 
-// verify checks one table's proof and returns the re-evaluated logs, the
-// proven block hashes by number, the proven transaction hashes by
-// (block<<32|tx) key and the per-block re-evaluated logs.
-func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uint64) ([]*types.Log, map[uint64]common.Hash, map[uint64]txMeta, map[uint64][]*types.Log, error) {
+// tableResult is the verified outcome of one table proof.
+type tableResult struct {
+	logs   []*types.Log           // matching logs in position order
+	blocks map[uint64]common.Hash // proven block entries by block number
+	anchor bool                   // the table is outside the proven range and only anchors headers
+}
+
+// verify checks one table's proof against the query over the proven range and
+// returns its matching logs and block entries. The entry checks are local to
+// the table; the cross-table checks are done by the caller.
+func (tqp *tableQueryProof) verify(query *FilterQuery, rangeFirst, rangeLast uint64) (*tableResult, error) {
 	if len(tqp.ProvenEntries) != len(tqp.EntryIndices) {
-		return nil, nil, nil, nil, errors.New("entry count and entry index count mismatch")
+		return nil, errors.New("entry count and entry index count mismatch")
 	}
 	var (
 		provenBlocks = make(map[uint64]common.Hash)
-		provenTxs    = make(map[uint64]txMeta)
+		provenTxs    = make(map[txKey]txMeta)
+		last         = tqp.FirstBlock + tqp.TableSize - 1
 	)
-	last := tqp.FirstBlock + tqp.TableSize - 1
 	for i, entryIndex := range tqp.EntryIndices {
 		if i > 0 && entryIndex <= tqp.EntryIndices[i-1] {
-			return nil, nil, nil, nil, errors.New("entry indices are not strictly ascending")
+			return nil, errors.New("entry indices are not strictly ascending")
 		}
 		if entryIndex >= tqp.EntryCount {
-			return nil, nil, nil, nil, errors.New("entry index out of range")
+			return nil, errors.New("entry index out of range")
 		}
 		if i > 0 && types.CompareEntries(tqp.ProvenEntries[i-1], tqp.ProvenEntries[i]) >= 0 {
-			return nil, nil, nil, nil, errors.New("proven entries are not strictly ascending")
+			return nil, errors.New("proven entries are not strictly ascending")
 		}
 		typ, content, blockNum, txIdx, logIdx, err := types.EntryFields(tqp.ProvenEntries[i])
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, err
 		}
 		// a table holds the block entries of the blocks before its own blocks
 		// (the entry of block n lives in the table that contains block n+1) and
 		// the transaction and log entries of its own blocks
 		if blockNum == math.MaxUint64 {
-			return nil, nil, nil, nil, errors.New("entry block number out of range")
+			return nil, errors.New("entry block number out of range")
 		}
 		switch typ {
 		case types.EntryTypeBlock:
 			if blockNum+1 < tqp.FirstBlock || blockNum+1 > last {
-				return nil, nil, nil, nil, errors.New("block entry outside the table range")
+				return nil, errors.New("block entry outside the table range")
 			}
 			if _, dup := provenBlocks[blockNum]; dup {
-				return nil, nil, nil, nil, errors.New("duplicate block entry")
+				return nil, errors.New("duplicate block entry")
 			}
 			provenBlocks[blockNum] = common.Hash(content)
 		case types.EntryTypeTransaction:
 			if blockNum < tqp.FirstBlock || blockNum > last {
-				return nil, nil, nil, nil, errors.New("transaction entry outside the table range")
+				return nil, errors.New("transaction entry outside the table range")
 			}
-			key := uint64(blockNum)<<32 | uint64(txIdx)
+			key := txKey{blockNum, txIdx}
 			if _, dup := provenTxs[key]; dup {
-				return nil, nil, nil, nil, errors.New("duplicate transaction entry")
+				return nil, errors.New("duplicate transaction entry")
 			}
 			// the transaction entry's log index field carries the cumulative
 			// log count of the block before the transaction
 			provenTxs[key] = txMeta{hash: common.Hash(content), logOffset: logIdx}
 		default:
 			if blockNum < tqp.FirstBlock || blockNum > last {
-				return nil, nil, nil, nil, errors.New("log entry outside the table range")
+				return nil, errors.New("log entry outside the table range")
 			}
 		}
 	}
-	var (
-		allLogs  []*types.Log
-		matchPos []types.IndexPosition
-		results  = make(map[uint64][]*types.Log)
-	)
+	res := &tableResult{blocks: provenBlocks}
+
+	// the part of the table inside the proven range; a table outside of it
+	// only anchors block headers and proves no results
+	scanFirst, scanLast := max(tqp.FirstBlock, rangeFirst), min(last, rangeLast)
+	if scanFirst > scanLast {
+		if len(tqp.BlockResults) != 0 || tqp.ResultCount != 0 {
+			return nil, errors.New("results in a table outside the proven range")
+		}
+		res.anchor = true
+		return res, nil
+	}
+
+	// decode the proven receipts: each needs a proven transaction entry, which
+	// supplies the transaction hash and the block-global log index offset
+	receiptLogs := make(map[txKey][]*types.Log)
 	for i := range tqp.BlockResults {
 		br := &tqp.BlockResults[i]
 		if br.Header.Number == nil {
-			return nil, nil, nil, nil, errors.New("block result without a number")
+			return nil, errors.New("block result without a number")
 		}
 		number := br.Header.Number.Uint64()
-		if number < tqp.FirstBlock || number >= tqp.FirstBlock+tqp.TableSize {
-			return nil, nil, nil, nil, errors.New("block result outside the table range")
-		}
-		if number < queryFirst || number > queryLast {
-			return nil, nil, nil, nil, errors.New("block result outside the query range")
+		if number < scanFirst || number > scanLast {
+			return nil, errors.New("block result outside the proven range")
 		}
 		if i > 0 && number <= tqp.BlockResults[i-1].Header.Number.Uint64() {
-			return nil, nil, nil, nil, errors.New("block results are not ascending")
+			return nil, errors.New("block results are not ascending")
 		}
-		for _, txi := range br.ProvenReceipts {
-			meta, ok := provenTxs[uint64(number)<<32|uint64(txi)]
+		for j, txi := range br.ProvenReceipts {
+			if j > 0 && txi <= br.ProvenReceipts[j-1] {
+				return nil, errors.New("proven receipts are not ascending")
+			}
+			meta, ok := provenTxs[txKey{number, txi}]
 			if !ok {
-				return nil, nil, nil, nil, errors.New("receipt transaction not proven by an index entry")
+				return nil, errors.New("receipt transaction not proven by an index entry")
 			}
 			receipt, err := br.getProvenReceipt(txi)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, err
 			}
-			blockLogs := make([]*types.Log, 0, len(receipt.Logs))
-			for i, log := range receipt.Logs {
+			logs := make([]*types.Log, len(receipt.Logs))
+			for k, log := range receipt.Logs {
 				clone := *log
 				clone.TxHash = meta.hash
 				clone.TxIndex = uint(txi)
 				clone.BlockHash = br.Header.Hash()
 				clone.BlockNumber = number
 				clone.BlockTimestamp = br.Header.Time
-				clone.Index = uint(meta.logOffset) + uint(i)
-				blockLogs = append(blockLogs, &clone)
+				clone.Index = uint(meta.logOffset) + uint(k)
+				logs[k] = &clone
 			}
-			results[uint64(number)<<32|uint64(txi)] = blockLogs
+			receiptLogs[txKey{number, txi}] = logs
 		}
 	}
-	// the potential match set implied by the proven entries, for the scanned
-	// part of the table (the intersection of the table with the query range)
-	begin := types.IndexPosition{BlockNumber: max(tqp.FirstBlock, queryFirst)}
-	end := types.IndexPosition{BlockNumber: min(tqp.FirstBlock+tqp.TableSize-1, queryLast), TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
-	potential := query.Pattern.proofMatches(tqp, begin, end)
-	// the inclusion/exclusion cross-check: for every proven log position,
-	// the pattern's verdict must agree with the potential set membership
-	// walk the proven results in ascending position order so the inclusion
-	// and exclusion sides are compared in the same order
-	keys := make([]uint64, 0, len(results))
-	for key := range results {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	for _, key := range keys {
-		blockNumber := uint64(key >> 32)
-		blockLogs := results[key]
-		for i, log := range blockLogs {
-			pos := types.IndexPosition{BlockNumber: blockNumber, TxIndex: uint32(log.TxIndex), LogIndex: uint32(i)}
-			matched := query.Pattern.matchLogs(blockLogs, i)
-			contained := potential.contains(pos)
-			if matched != contained {
-				return nil, nil, nil, nil, fmt.Errorf("inclusion and exclusion proofs do not match at block #%d tx %d log %d (pattern=%v entries=%v)", blockNumber, pos.TxIndex, pos.LogIndex, matched, contained)
-			}
-			if matched {
-				allLogs = append(allLogs, log)
-				matchPos = append(matchPos, pos)
-			}
-		}
-	}
-	return allLogs, provenBlocks, provenTxs, results, nil
-}
 
-// lastProvenBlock returns the header hash of the table's last proven block
-// when it sits at the table's last position: the next table's parent block
-// entry chains to it.
-func (tqp *tableQueryProof) lastProvenBlock() common.Hash {
-	if len(tqp.BlockResults) == 0 {
-		return common.Hash{}
+	// the candidate positions the proven entries leave open: every one of them
+	// needs its receipt, and the results are the candidates whose log matches
+	begin := types.IndexPosition{BlockNumber: scanFirst}
+	end := types.IndexPosition{BlockNumber: scanLast, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
+	candidates, bounded := query.Pattern.candidates(tqp, begin, end)
+	if !bounded {
+		return nil, errors.New("the proven entries do not bound the pattern's matches")
 	}
-	last := tqp.BlockResults[len(tqp.BlockResults)-1]
-	if last.Header.Number.Uint64() == tqp.FirstBlock+tqp.TableSize-1 {
-		return last.Header.Hash()
+	for _, pos := range candidates {
+		logs, ok := receiptLogs[txKey{pos.BlockNumber, pos.TxIndex}]
+		if !ok {
+			return nil, fmt.Errorf("missing receipt proof for candidate at block #%d tx %d log %d", pos.BlockNumber, pos.TxIndex, pos.LogIndex)
+		}
+		if query.Pattern.matchLogs(logs, int(pos.LogIndex)) {
+			res.logs = append(res.logs, logs[pos.LogIndex])
+		}
 	}
-	return common.Hash{}
+	if uint64(len(res.logs)) != tqp.ResultCount {
+		return nil, errors.New("result count does not match the proven results")
+	}
+	return res, nil
 }
 
 // calculateTableRoot reconstructs the table root from the proven entries and

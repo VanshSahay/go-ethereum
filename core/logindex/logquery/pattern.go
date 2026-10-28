@@ -17,12 +17,11 @@
 package logquery
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"math"
 	"slices"
-	"sort"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -31,70 +30,53 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// ErrMatchAll is returned for match-all queries: proving "everything" without
-// any filter criterion is not a meaningful query.
+const (
+	// maxPatternDepth and maxPatternNodes bound the size of a search pattern
+	// parsed from untrusted JSON.
+	maxPatternDepth = 16
+	maxPatternNodes = 1024
+
+	// maxOffsetAmount bounds the log index offset of an offset matcher.
+	maxOffsetAmount = math.MaxInt32
+)
+
+// ErrMatchAll is returned for match-all queries: proving every log of every
+// block without any filter criterion is not a meaningful query.
 var ErrMatchAll = errors.New("match-all queries not allowed")
 
-// PatternMatcher defines a general abstraction for any matcher configuration
-// that can instantiate a matcher instance operating on a single index table.
+// PatternMatcher is a search pattern over the logs of a block range. A pattern
+// is evaluated in two independent ways that must agree:
+//
+//   - matchLogs decides whether a log of a receipt matches, from the receipt
+//     alone;
+//   - candidates derives from index entry runs a set of log positions that is
+//     guaranteed to contain every matching position.
+//
+// A result is a candidate position whose log matches. The prover builds the
+// proof from the candidates and the verifier recomputes them from the proven
+// entries, so a position the entries do not rule out can only be accepted or
+// rejected on the strength of its receipt.
 type PatternMatcher interface {
-	newInstance(ctx context.Context, reader *directionalReader, first, last types.IndexPosition) matcherInstance
 	matchLogs(logs []*types.Log, index int) bool
-	proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet
-	// proofValues lists the leaf entry values the pattern searches for: the
-	// prover proves every entry of these values in the scanned range so the
-	// verifier can reconstruct the exact potential match set.
-	proofValues() []matcherValue
+	candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool)
 	json.Marshaler
 }
 
-// matcherInstance iterates over matching index positions of a single table in
-// the specified range.
-type matcherInstance interface {
-	next() (*types.IndexPosition, error)
-	advance(*types.IndexPosition) error
+// runSource supplies the entry runs a pattern is evaluated on: the proven
+// entries of a table proof on the verifier side, the table reader on the
+// prover side.
+type runSource interface {
+	// valueRun returns the positions of all entries of the given type and
+	// content within [begin, end], in ascending order. It reports false when
+	// the source cannot guarantee that the run is complete.
+	valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool)
 }
 
-// matcherValue is the searchable content a matcher looks for: an entry type
-// plus the raw content bytes (32 for block/transaction/topic, 20 for address).
+// matcherValue is the searchable content of a leaf matcher: an entry type plus
+// the raw content bytes (20 for an address, 32 for a topic).
 type matcherValue struct {
 	typ     uint32
 	content []byte
-}
-
-// entryPrefixMatches tells whether the entry's type id and content match the
-// matcher value, ignoring the position tail.
-func (v matcherValue) entryPrefixMatches(entry types.IndexEntry) bool {
-	if len(entry) != types.EntryTypeSize+len(v.content)+entryPositionTail(types.EntryType(v.typ)) {
-		return false
-	}
-	if uint32(entry[0])<<8|uint32(entry[1]) != v.typ {
-		return false
-	}
-	return slices.Equal(entry[types.EntryTypeSize:types.EntryTypeSize+len(v.content)], v.content)
-}
-
-func entryPositionTail(typ types.EntryType) int {
-	if typ == types.EntryTypeBlock {
-		return types.BlockNumberSize
-	}
-	return types.BlockNumberSize + types.TxIndexSize + types.LogIndexSize
-}
-
-// boundaryEntry builds the raw encoding of the value with the position tail
-// set to p, used as a SeekEntry boundary.
-func (v matcherValue) boundaryEntry(p types.IndexPosition) types.IndexEntry {
-	return types.EncodeEntry(types.EntryType(v.typ), v.content, p.BlockNumber, p.TxIndex, p.LogIndex)
-}
-
-// entryPosition decodes the position of a table entry, panicking on malformed
-// input: the entries always originate from the indexer's own tables.
-func entryPosition(entry types.IndexEntry) types.IndexPosition {
-	pos, err := types.PositionFromEntry(entry)
-	if err != nil {
-		panic("malformed index entry: " + err.Error())
-	}
-	return pos
 }
 
 // findInEntries binary searches sorted entries. Returns the smallest index
@@ -116,10 +98,21 @@ func findInEntries(entries []types.IndexEntry, target types.IndexEntry) (int, bo
 }
 
 // NewPatternMatcherFromJSON parses the recursive search pattern grammar: a
-// leaf is {"field": "block|transaction|address|topics[i]", "value": hex},
-// combinators are {"anyOf": [...]} / {"allOf": [...]} and a positional
-// reference is {"offset": <pattern>, "amount": int}.
+// leaf is {"field": "address|topics[i]", "value": hex}, combinators are
+// {"anyOf": [...]} / {"allOf": [...]} and a positional reference is
+// {"offset": <pattern>, "amount": int}.
 func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
+	nodes := 0
+	return parsePattern(msg, 0, &nodes)
+}
+
+func parsePattern(msg json.RawMessage, depth int, nodes *int) (PatternMatcher, error) {
+	if depth > maxPatternDepth {
+		return nil, errors.New("pattern is nested too deeply")
+	}
+	if *nodes++; *nodes > maxPatternNodes {
+		return nil, errors.New("pattern is too large")
+	}
 	var p struct {
 		Type   *string           `json:"field"`
 		Value  *string           `json:"value"`
@@ -145,44 +138,7 @@ func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
 		if err != nil {
 			return nil, errors.New("invalid entry value hex string")
 		}
-		if len(value) > 32 {
-			return nil, errors.New("entry value is longer than 32 bytes")
-		}
-		var (
-			typ     uint32
-			content []byte
-		)
-		switch {
-		case *p.Type == "block":
-			typ = uint32(types.EntryTypeBlock)
-			content = make([]byte, 32)
-			copy(content[32-len(value):], value)
-		case *p.Type == "transaction":
-			typ = uint32(types.EntryTypeTransaction)
-			content = make([]byte, 32)
-			copy(content[32-len(value):], value)
-		case *p.Type == "address":
-			typ = uint32(types.EntryTypeLogAddress)
-			content = make([]byte, common.AddressLength)
-			if len(value) == 32 {
-				// the JSON round-trip emits left-padded 32-byte values: the
-				// address is the low 20 bytes
-				copy(content, value[12:])
-			} else {
-				copy(content[common.AddressLength-len(value):], value)
-			}
-		case len(*p.Type) > 8 && (*p.Type)[:7] == "topics[" && (*p.Type)[len(*p.Type)-1:] == "]":
-			topicIndex, err := strconv.Atoi((*p.Type)[7 : len(*p.Type)-1])
-			if err != nil || topicIndex < 0 || topicIndex >= logindex.MaxTopicCount {
-				return nil, errors.New("invalid topic index")
-			}
-			typ = uint32(types.EntryTypeLogTopic0) + uint32(topicIndex)
-			content = make([]byte, 32)
-			copy(content[32-len(value):], value)
-		default:
-			return nil, errors.New("unknown entry type")
-		}
-		return &singleMatcher{value: matcherValue{typ: typ, content: content}}, nil
+		return newLeafMatcher(*p.Type, value)
 	}
 	if p.Offset != nil || p.Amount != nil {
 		if p.Offset == nil {
@@ -194,7 +150,10 @@ func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
 		if len(p.AnyOf) != 0 || len(p.AllOf) != 0 {
 			return nil, errors.New("both type/value and combinator fields specified")
 		}
-		child, err := NewPatternMatcherFromJSON(*p.Offset)
+		if *p.Amount > maxOffsetAmount || *p.Amount < -maxOffsetAmount {
+			return nil, errors.New("offset amount out of range")
+		}
+		child, err := parsePattern(*p.Offset, depth+1, nodes)
 		if err != nil {
 			return nil, err
 		}
@@ -206,9 +165,9 @@ func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
 	if len(p.AnyOf) != 0 {
 		m := make(matchAny, len(p.AnyOf))
 		for i, msg := range p.AnyOf {
-			pm, perr := NewPatternMatcherFromJSON(msg)
-			if perr != nil {
-				return nil, perr
+			pm, err := parsePattern(msg, depth+1, nodes)
+			if err != nil {
+				return nil, err
 			}
 			m[i] = pm
 		}
@@ -217,15 +176,46 @@ func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
 	if len(p.AllOf) != 0 {
 		m := make(matchAll, len(p.AllOf))
 		for i, msg := range p.AllOf {
-			pm, perr := NewPatternMatcherFromJSON(msg)
-			if perr != nil {
-				return nil, perr
+			pm, err := parsePattern(msg, depth+1, nodes)
+			if err != nil {
+				return nil, err
 			}
 			m[i] = pm
 		}
 		return m, nil
 	}
 	return nil, errors.New("empty pattern matcher is not allowed")
+}
+
+// newLeafMatcher builds a leaf matcher from its field name and value. An
+// address is exactly 20 bytes (or 20 bytes right-padded with zeros to 32); a
+// topic is up to 32 bytes, right-padded with zeros.
+func newLeafMatcher(field string, value []byte) (PatternMatcher, error) {
+	if len(value) > common.HashLength {
+		return nil, errors.New("entry value is longer than 32 bytes")
+	}
+	switch {
+	case field == "address":
+		content := make([]byte, common.AddressLength)
+		switch {
+		case len(value) == common.AddressLength:
+			copy(content, value)
+		case len(value) == common.HashLength && !slices.ContainsFunc(value[common.AddressLength:], func(b byte) bool { return b != 0 }):
+			copy(content, value[:common.AddressLength])
+		default:
+			return nil, errors.New("invalid address length")
+		}
+		return &singleMatcher{value: matcherValue{typ: uint32(types.EntryTypeLogAddress), content: content}}, nil
+	case len(field) > 8 && field[:7] == "topics[" && field[len(field)-1:] == "]":
+		topicIndex, err := strconv.Atoi(field[7 : len(field)-1])
+		if err != nil || topicIndex < 0 || topicIndex >= logindex.MaxTopicCount {
+			return nil, errors.New("invalid topic index")
+		}
+		content := make([]byte, common.HashLength)
+		copy(content, value)
+		return &singleMatcher{value: matcherValue{typ: uint32(types.EntryTypeLogTopic0) + uint32(topicIndex), content: content}}, nil
+	}
+	return nil, errors.New("unknown entry type")
 }
 
 // normalizePattern collapses single-element combinators so that equivalent
@@ -261,13 +251,16 @@ func normalizePattern(m PatternMatcher) PatternMatcher {
 // any of the given addresses with all of the given topic positions matching.
 // Empty criteria yield ErrMatchAll.
 func NewLegacyMatcher(addresses []common.Address, topics [][]common.Hash) (PatternMatcher, error) {
+	if len(topics) > logindex.MaxTopicCount {
+		return nil, errors.New("too many topic positions")
+	}
 	matcher := make(matchAll, 0, len(topics)+1)
 	if len(addresses) > 0 {
 		matchAddress := make(matchAny, len(addresses))
 		for i, address := range addresses {
 			matchAddress[i] = &singleMatcher{value: matcherValue{
 				typ:     uint32(types.EntryTypeLogAddress),
-				content: address[:],
+				content: slices.Clone(address[:]),
 			}}
 		}
 		matcher = append(matcher, matchAddress)
@@ -278,7 +271,7 @@ func NewLegacyMatcher(addresses []common.Address, topics [][]common.Hash) (Patte
 			for j, topic := range topicList {
 				matchTopic[j] = &singleMatcher{value: matcherValue{
 					typ:     uint32(types.EntryTypeLogTopic0) + uint32(i),
-					content: topic[:],
+					content: slices.Clone(topic[:]),
 				}}
 			}
 			matcher = append(matcher, matchTopic)
@@ -290,38 +283,9 @@ func NewLegacyMatcher(addresses []common.Address, topics [][]common.Hash) (Patte
 	return nil, ErrMatchAll
 }
 
-// singleMatcher matches a single log value.
+// singleMatcher matches a single log value: an address or a topic.
 type singleMatcher struct {
 	value matcherValue
-}
-
-// singleMatcherInstance iterates the entries of one table matching the value,
-// between the first and last positions.
-type singleMatcherInstance struct {
-	value       matcherValue
-	ctx         context.Context
-	reader      *directionalReader
-	entryPtr    uint64
-	initialized bool
-	isEmpty     bool
-	first, last types.IndexPosition
-	currentPos  *types.IndexPosition
-}
-
-func (m *singleMatcher) newInstance(ctx context.Context, reader *directionalReader, first, last types.IndexPosition) matcherInstance {
-	mi := &singleMatcherInstance{
-		value:  m.value,
-		ctx:    ctx,
-		reader: reader,
-		first:  first,
-		last:   last,
-	}
-	if firstEntry, firstExists := reader.firstEntry(); firstExists {
-		mi.entryPtr = firstEntry
-	} else {
-		mi.isEmpty = true
-	}
-	return mi
 }
 
 func (m *singleMatcher) matchLogs(logs []*types.Log, index int) bool {
@@ -329,136 +293,40 @@ func (m *singleMatcher) matchLogs(logs []*types.Log, index int) bool {
 		return false
 	}
 	log := logs[index]
-	switch {
-	case m.value.typ == uint32(types.EntryTypeLogAddress):
-		return slices.Equal(log.Address[:], m.value.content)
-	case m.value.typ >= uint32(types.EntryTypeLogTopic0) && m.value.typ < uint32(types.EntryTypeLogTopic0)+logindex.MaxTopicCount:
-		i := int(m.value.typ) - int(types.EntryTypeLogTopic0)
-		return len(log.Topics) > i && slices.Equal(log.Topics[i][:], m.value.content)
-	default:
-		panic("matchLogs only allowed for address/topic matchers")
+	if m.value.typ == uint32(types.EntryTypeLogAddress) {
+		return bytes.Equal(log.Address[:], m.value.content)
 	}
+	i := int(m.value.typ) - int(types.EntryTypeLogTopic0)
+	return len(log.Topics) > i && bytes.Equal(log.Topics[i][:], m.value.content)
 }
 
-func (m *singleMatcher) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {
-	return tqp.getValueMatches(m.value.typ, m.value.content, begin, end)
-}
-
-func (m *singleMatcher) proofValues() []matcherValue {
-	return []matcherValue{m.value}
+func (m *singleMatcher) candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool) {
+	return src.valueRun(m.value.typ, m.value.content, begin, end)
 }
 
 func (m *singleMatcher) MarshalJSON() ([]byte, error) {
 	enc := struct {
-		Type  string      `json:"field"`
-		Value common.Hash `json:"value"`
-	}{}
-	enc.Value = common.Hash{}
-	copy(enc.Value[32-len(m.value.content):], m.value.content)
-	switch {
-	case m.value.typ == uint32(types.EntryTypeBlock):
-		enc.Type = "block"
-	case m.value.typ == uint32(types.EntryTypeTransaction):
-		enc.Type = "transaction"
-	case m.value.typ == uint32(types.EntryTypeLogAddress):
+		Type  string        `json:"field"`
+		Value hexutil.Bytes `json:"value"`
+	}{Value: m.value.content}
+	if m.value.typ == uint32(types.EntryTypeLogAddress) {
 		enc.Type = "address"
-	case m.value.typ >= uint32(types.EntryTypeLogTopic0) && m.value.typ < uint32(types.EntryTypeLogTopic0)+logindex.MaxTopicCount:
+	} else {
 		enc.Type = "topics[" + strconv.Itoa(int(m.value.typ)-int(types.EntryTypeLogTopic0)) + "]"
-	default:
-		enc.Type = "unknown"
 	}
 	return json.Marshal(enc)
 }
 
-func (m *singleMatcherInstance) init() error {
-	m.initialized = true
-	if err := m.advance(&m.first); err != nil {
-		m.initialized = false
-		return err
-	}
-	return nil
-}
-
-// next returns the next matching position.
-func (m *singleMatcherInstance) next() (*types.IndexPosition, error) {
-	if !m.initialized {
-		if err := m.init(); err != nil {
-			return nil, err
-		}
-	}
-	if m.currentPos == nil {
-		if m.isEmpty {
-			return nil, nil
-		}
-		entry, err := m.reader.getEntry(m.entryPtr)
-		if err != nil {
-			return nil, err
-		}
-		pos := entryPosition(entry)
-		if !m.value.entryPrefixMatches(entry) || m.reader.comparePosition(&pos, &m.last) > 0 {
-			m.isEmpty = true
-			return nil, nil
-		}
-		m.currentPos = &pos
-	}
-	return m.currentPos, nil
-}
-
-// advance moves the iterator to the next matching position at or after the
-// given position, or to the next entry when findPos is nil.
-func (m *singleMatcherInstance) advance(findPos *types.IndexPosition) error {
-	select {
-	case <-m.ctx.Done():
-		return m.ctx.Err()
-	default:
-	}
-	if !m.initialized {
-		if err := m.init(); err != nil {
-			return err
-		}
-	}
-	if m.isEmpty {
-		return nil
-	}
-	m.currentPos = nil
-	if findPos == nil {
-		if nextEntry, ok := m.reader.prevNextEntry(m.entryPtr, true); ok {
-			m.entryPtr = nextEntry
-		} else {
-			m.isEmpty = true
-		}
-		return nil
-	}
-	if m.reader.comparePosition(findPos, &m.last) > 0 {
-		findPos = &m.last
-	}
-	target := m.value.boundaryEntry(*findPos)
-	newEntryPtr, valid, err := m.reader.entryAtOrAfter(target)
-	if err != nil {
-		return err
-	}
-	if valid {
-		m.entryPtr = newEntryPtr
-	} else {
-		m.isEmpty = true
-	}
-	return nil
-}
-
 // offsetMatcher matches the child pattern at the given log index offset
-// relative to its own matches.
+// relative to its own matches: it matches log i of a receipt when the child
+// matches log i+offset. It never matches when i+offset is negative.
 type offsetMatcher struct {
 	child  PatternMatcher
 	offset int
 }
 
-type offsetMatcherInstance struct {
-	childInstance matcherInstance
-	offset        int
-	currentPos    *types.IndexPosition
-	isEmpty       bool
-}
-
+// addOffset shifts the log index of a position, reporting true when the result
+// is outside the log index range (the position is then clamped).
 func addOffset(pos *types.IndexPosition, offset int) bool {
 	logIndex := int64(pos.LogIndex) + int64(offset)
 	if logIndex < 0 {
@@ -473,15 +341,6 @@ func addOffset(pos *types.IndexPosition, offset int) bool {
 	return false
 }
 
-func (m *offsetMatcher) newInstance(ctx context.Context, reader *directionalReader, first, last types.IndexPosition) matcherInstance {
-	addOffset(&first, m.offset)
-	addOffset(&last, m.offset)
-	return &offsetMatcherInstance{
-		childInstance: m.child.newInstance(ctx, reader, first, last),
-		offset:        m.offset,
-	}
-}
-
 func (m *offsetMatcher) matchLogs(logs []*types.Log, index int) bool {
 	index += m.offset
 	if index < 0 || index >= len(logs) {
@@ -490,21 +349,24 @@ func (m *offsetMatcher) matchLogs(logs []*types.Log, index int) bool {
 	return m.child.matchLogs(logs, index)
 }
 
-func (m *offsetMatcher) proofValues() []matcherValue {
-	return m.child.proofValues()
-}
-
-func (m *offsetMatcher) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {
+func (m *offsetMatcher) candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool) {
+	// the child is evaluated over the shifted range; a clamped bound only
+	// widens the child's range, which is harmless
 	addOffset(&begin, m.offset)
 	addOffset(&end, m.offset)
-	ips := m.child.proofMatches(tqp, begin, end)
-	shifted := make(indexPositionSet, 0, len(ips))
-	for _, p := range ips {
-		addOffset(&p, -m.offset)
-		shifted = append(shifted, p)
+	set, ok := m.child.candidates(src, begin, end)
+	if !ok {
+		return nil, false
 	}
-	sort.Slice(shifted, func(i, j int) bool { return shifted[i].Compare(shifted[j]) < 0 })
-	return shifted
+	shifted := make(indexPositionSet, 0, len(set))
+	for _, p := range set {
+		// a child position that maps to a negative log index cannot be
+		// matched by this pattern
+		if !addOffset(&p, -m.offset) {
+			shifted = append(shifted, p)
+		}
+	}
+	return shifted, true
 }
 
 func (m *offsetMatcher) MarshalJSON() ([]byte, error) {
@@ -517,69 +379,8 @@ func (m *offsetMatcher) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func (m *offsetMatcherInstance) next() (*types.IndexPosition, error) {
-	if m.isEmpty {
-		return nil, nil
-	}
-	if m.currentPos == nil {
-		for {
-			pos, err := m.childInstance.next()
-			if err != nil {
-				return nil, err
-			}
-			if pos == nil {
-				m.isEmpty = true
-				return nil, nil
-			}
-			current := *pos
-			if !addOffset(&current, -m.offset) {
-				m.currentPos = &current
-				break
-			}
-			if err := m.childInstance.advance(nil); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return m.currentPos, nil
-}
-
-func (m *offsetMatcherInstance) advance(findPos *types.IndexPosition) error {
-	if m.isEmpty {
-		return nil
-	}
-	m.currentPos = nil
-	if findPos == nil {
-		return m.childInstance.advance(nil)
-	}
-	fpos := *findPos
-	addOffset(&fpos, m.offset)
-	return m.childInstance.advance(&fpos)
-}
-
 // matchAny combines a set of matchers and matches where any of them does.
 type matchAny []PatternMatcher
-
-type matchAnyInstance struct {
-	children   []matcherInstance
-	reader     *directionalReader
-	currentPos *types.IndexPosition
-	isEmpty    bool
-}
-
-func (m matchAny) newInstance(ctx context.Context, reader *directionalReader, first, last types.IndexPosition) matcherInstance {
-	if len(m) == 1 {
-		return m[0].newInstance(ctx, reader, first, last)
-	}
-	mi := &matchAnyInstance{
-		children: make([]matcherInstance, len(m)),
-		reader:   reader,
-	}
-	for i, mm := range m {
-		mi.children[i] = mm.newInstance(ctx, reader, first, last)
-	}
-	return mi
-}
 
 func (m matchAny) matchLogs(logs []*types.Log, index int) bool {
 	for _, mm := range m {
@@ -590,20 +391,18 @@ func (m matchAny) matchLogs(logs []*types.Log, index int) bool {
 	return false
 }
 
-func (m matchAny) proofValues() []matcherValue {
-	var values []matcherValue
-	for _, sub := range m {
-		values = append(values, sub.proofValues()...)
-	}
-	return values
-}
-
-func (m matchAny) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {
-	childResults := make([]indexPositionSet, len(m))
+// candidates is the union of the children's candidates; every child must be
+// bounded, otherwise a match could hide in the unbounded one.
+func (m matchAny) candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool) {
+	sets := make([]indexPositionSet, len(m))
 	for i, mm := range m {
-		childResults[i] = mm.proofMatches(tqp, begin, end)
+		set, ok := mm.candidates(src, begin, end)
+		if !ok {
+			return nil, false
+		}
+		sets[i] = set
 	}
-	return ipsUnion(childResults)
+	return ipsUnion(sets), true
 }
 
 func (m matchAny) MarshalJSON() ([]byte, error) {
@@ -612,78 +411,8 @@ func (m matchAny) MarshalJSON() ([]byte, error) {
 	}{m})
 }
 
-func (m *matchAnyInstance) next() (*types.IndexPosition, error) {
-	if m.isEmpty || m.currentPos != nil {
-		return m.currentPos, nil
-	}
-	for _, cm := range m.children {
-		pos, err := cm.next()
-		if err != nil {
-			return nil, err
-		}
-		if pos != nil && (m.currentPos == nil || m.reader.comparePosition(m.currentPos, pos) == 1) {
-			m.currentPos = pos
-		}
-	}
-	m.isEmpty = m.currentPos == nil
-	return m.currentPos, nil
-}
-
-func (m *matchAnyInstance) advance(findPos *types.IndexPosition) error {
-	if m.isEmpty {
-		return nil
-	}
-	if findPos == nil {
-		currentPos, err := m.next()
-		if err != nil {
-			return err
-		}
-		if currentPos == nil {
-			return nil
-		}
-		m.currentPos = nil
-		for _, cm := range m.children {
-			pos, _ := cm.next()
-			if pos != nil && *pos == *currentPos {
-				if err := cm.advance(nil); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	m.currentPos = nil
-	for _, cm := range m.children {
-		if err := cm.advance(findPos); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // matchAll combines a set of matchers and matches where all of them do.
 type matchAll []PatternMatcher
-
-type matchAllInstance struct {
-	children   []matcherInstance
-	reader     *directionalReader
-	currentPos *types.IndexPosition
-	isEmpty    bool
-}
-
-func (m matchAll) newInstance(ctx context.Context, reader *directionalReader, first, last types.IndexPosition) matcherInstance {
-	if len(m) == 1 {
-		return m[0].newInstance(ctx, reader, first, last)
-	}
-	mi := &matchAllInstance{
-		children: make([]matcherInstance, len(m)),
-		reader:   reader,
-	}
-	for i, mm := range m {
-		mi.children[i] = mm.newInstance(ctx, reader, first, last)
-	}
-	return mi
-}
 
 func (m matchAll) matchLogs(logs []*types.Log, index int) bool {
 	for _, mm := range m {
@@ -694,145 +423,24 @@ func (m matchAll) matchLogs(logs []*types.Log, index int) bool {
 	return true
 }
 
-func (m matchAll) proofValues() []matcherValue {
-	var values []matcherValue
-	for _, sub := range m {
-		values = append(values, sub.proofValues()...)
+// candidates is the intersection of the candidates of the bounded children: a
+// match matches every child, so one bounded child is enough to bound the
+// pattern, and each further bounded child only narrows the set.
+func (m matchAll) candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool) {
+	var sets []indexPositionSet
+	for _, mm := range m {
+		if set, ok := mm.candidates(src, begin, end); ok {
+			sets = append(sets, set)
+		}
 	}
-	return values
-}
-
-func (m matchAll) proofMatches(tqp *tableQueryProof, begin, end types.IndexPosition) indexPositionSet {
-	childResults := make([]indexPositionSet, len(m))
-	for i, mm := range m {
-		childResults[i] = mm.proofMatches(tqp, begin, end)
+	if len(sets) == 0 {
+		return nil, false
 	}
-	return ipsIntersection(childResults)
+	return ipsIntersection(sets), true
 }
 
 func (m matchAll) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		AllOf []PatternMatcher `json:"allOf"`
 	}{m})
-}
-
-func (m *matchAllInstance) next() (*types.IndexPosition, error) {
-	if m.isEmpty || m.currentPos != nil {
-		return m.currentPos, nil
-	}
-	for {
-		match := true
-		var next *types.IndexPosition
-		for i, cm := range m.children {
-			pos, err := cm.next()
-			if err != nil {
-				return nil, err
-			}
-			if pos == nil {
-				m.isEmpty = true
-				return nil, nil
-			}
-			if i == 0 {
-				next = pos
-			} else {
-				switch m.reader.comparePosition(next, pos) {
-				case 1:
-					match = false
-				case -1:
-					next = pos
-					match = false
-				}
-			}
-		}
-		if match {
-			m.currentPos = next
-			return next, nil
-		}
-		for _, cm := range m.children {
-			if pos, _ := cm.next(); *pos != *next {
-				if err := cm.advance(next); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-}
-
-func (m *matchAllInstance) advance(findPos *types.IndexPosition) error {
-	if m.isEmpty {
-		return nil
-	}
-	if findPos == nil {
-		if _, err := m.next(); err != nil {
-			return err
-		}
-	}
-	m.currentPos = nil
-	for _, cm := range m.children {
-		if err := cm.advance(findPos); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// directionalReader iterates a table's entries forward or in reverse.
-type directionalReader struct {
-	reader  *logindex.TableReader
-	reverse bool
-}
-
-func (dr *directionalReader) firstEntry() (uint64, bool) {
-	if dr.reader.EntryCount == 0 {
-		return 0, false
-	}
-	if dr.reverse {
-		return dr.reader.EntryCount - 1, true
-	}
-	return 0, true
-}
-
-func (dr *directionalReader) prevNextEntry(entryIndex uint64, next bool) (uint64, bool) {
-	if dr.reverse == next {
-		if entryIndex == 0 {
-			return 0, false
-		}
-		return entryIndex - 1, true
-	}
-	if entryIndex+1 >= dr.reader.EntryCount {
-		return 0, false
-	}
-	return entryIndex + 1, true
-}
-
-func (dr *directionalReader) entryAtOrAfter(target types.IndexEntry) (uint64, bool, error) {
-	pos, found, err := dr.reader.SeekEntry(target)
-	if err != nil {
-		return 0, false, err
-	}
-	if dr.reverse {
-		if !found {
-			if pos == 0 {
-				return 0, false, nil
-			}
-			pos--
-		}
-		return pos, true, nil
-	}
-	if pos >= dr.reader.EntryCount {
-		return 0, false, nil
-	}
-	return pos, true, nil
-}
-
-func (dr *directionalReader) comparePosition(a, b *types.IndexPosition) int {
-	cmp := a.Compare(*b)
-	if dr.reverse {
-		return -cmp
-	}
-	return cmp
-}
-
-func (dr *directionalReader) getEntry(index uint64) (types.IndexEntry, error) {
-	return dr.reader.GetEntry(index)
 }
