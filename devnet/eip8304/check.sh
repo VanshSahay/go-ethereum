@@ -16,6 +16,8 @@
 #                see dev/run.sh.
 #   TAMPER_ALL   non-empty: also flip every hex/base64 string of one proof, one at a
 #                time, and require each modified proof to be rejected.
+#   TAMPER_STRIDE modify only every Nth string (default 1): a proof of a busy
+#                chain has thousands of strings and each check parses it.
 #   PROXY_PORT   listen port of the adversarial proxy (default 28545).
 #
 # With a second participant (the devnet runs one with --logindex.disable) the
@@ -216,7 +218,7 @@ done
 
 if [ -n "${TAMPER_ALL:-}" ]; then
   echo
-  echo "== exhaustive tamper scan (every hex and base64 string of one proof, one byte flipped each) =="
+  echo "== tamper scan (hex and base64 strings of one proof, one byte flipped each, every ${TAMPER_STRIDE:-1}th) =="
   SCANNED=0
   while true; do
     if OUTPUT=$(VTO=$SMALL_TO verify_proof "$OUT/proof-none.json" "$TRANSFER" tamper "$SCANNED" 2>&1); then
@@ -225,9 +227,9 @@ if [ -n "${TAMPER_ALL:-}" ]; then
       exit 1
     fi
     if echo "$OUTPUT" | grep -q "out of range"; then break; fi
-    SCANNED=$((SCANNED + 1))
+    SCANNED=$((SCANNED + ${TAMPER_STRIDE:-1}))
   done
-  echo "all $SCANNED single-byte modifications rejected"
+  echo "every ${TAMPER_STRIDE:-1}th of the proof's strings (up to index $SCANNED) was modified: all rejected"
 fi
 
 echo
