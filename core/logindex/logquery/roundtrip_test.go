@@ -138,7 +138,7 @@ func (b *rtBackend) StateProverAt(header *types.Header, proofNodes, proofCodes m
 func TestQueryProofRoundTrip(t *testing.T) {
 	rtc := newRTChain(t, 40)
 	v := &rtView{rtc}
-	backend := &rtBackend{bc: rtc.bc}
+	opts := DefaultVerifyOptions(rtc.bc.Config())
 
 	// match the emitter's address: every LOG0 it emits carries that address
 	emitterAddr := crypto.CreateAddress(rtSender, 1)
@@ -149,12 +149,13 @@ func TestQueryProofRoundTrip(t *testing.T) {
 	// query through head-1: the last block's level-0 table root is not yet
 	// readable via the contract's get() at the reference head (the one-block
 	// publication lag the golden contract test pins)
-	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, FilterQuery{
+	req := FilterQuery{
 		Pattern:    matcher,
 		FirstBlock: 1,
 		LastBlock:  39,
 		Limit:      rtMaxUint64,
-	}, true)
+	}
+	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, req, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,17 +173,18 @@ func TestQueryProofRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(enc, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	verified, err := decoded.Verify(backend)
+	trusted := rtc.bc.CurrentBlock()
+	res, err := decoded.Verify(trusted, req, opts)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if len(verified) != len(logs) {
-		t.Fatalf("verified %d logs, want %d", len(verified), len(logs))
+	if len(res.Logs) != len(logs) {
+		t.Fatalf("verified %d logs, want %d", len(res.Logs), len(logs))
 	}
 	tamper := func(mutate func(p *QueryProof)) error {
 		p := decoded
 		mutate(&p)
-		_, err := p.Verify(backend)
+		_, err := p.Verify(trusted, req, opts)
 		return err
 	}
 	if err := tamper(func(p *QueryProof) {

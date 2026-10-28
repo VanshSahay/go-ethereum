@@ -401,21 +401,23 @@ func makeQueryProof(refHeader *types.Header, query *FilterQuery, firstBlock, las
 		proveParentBlock = tproof.lastProvenBlock()
 		tproof.IndexContract = proof.addOrGetIndexContract(prover.reader.IndexContract)
 		proof.TableQueryProofs[i] = tproof
-		// generate state proof nodes for the table root; the last table uses
-		// the raw storage slot (its get() freshness window has not opened at
-		// the reference head yet)
-		// tables inside their get() confirmation delay prove the root via the
-		// raw storage slot (set by the system call at publication regardless
-		// of the window); older tables execute get() on the proven state
+		// generate the state proof nodes of the table root: tables published
+		// in the reference block itself are read from the raw storage slot (get()
+		// still reverts there), older ones by executing get() on the proven state
 		br := prover.reader.BlockRange()
-		fresh := logindex.PublicationSchedule(br.Count(), br.First())+1 > refHeader.Number.Uint64()
+		path, err := checkTable(br.Count(), br.First(), refHeader.Number.Uint64())
+		if err != nil {
+			return nil, err
+		}
 		var tableRoot common.Hash
-		if fresh {
+		if path == pathRaw {
 			statedb, err := backend.StateProverAt(refHeader, proofNodes, proofCodes)
 			if err != nil {
 				return nil, err
 			}
-			tableRoot = getTableRootRaw(statedb, prover.reader.IndexContract, br.First(), br.Count())
+			if tableRoot, err = getTableRootRaw(statedb, prover.reader.IndexContract, br.First(), br.Count()); err != nil {
+				return nil, err
+			}
 		} else {
 			tableRoot, err = proveTableRoot(backend, refHeader, prover.reader.IndexContract, br.First(), br.Count(), proofNodes, proofCodes)
 			if err != nil {

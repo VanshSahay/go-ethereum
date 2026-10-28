@@ -19,6 +19,7 @@ package eth
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"math/big"
 	"testing"
 
@@ -116,10 +117,22 @@ func TestPurethGetLogsWithProof(t *testing.T) {
 	if err := json.Unmarshal(enc, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	verified, err := decoded.Verify(logIndexProverBackend{bc})
+	pattern, err := logquery.NewLegacyMatcher([]common.Address{emitterAddr}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := bc.CurrentBlock()
+	opts := logquery.DefaultVerifyOptions(bc.Config())
+	verifiedRes, err := decoded.Verify(trusted, logquery.FilterQuery{
+		Pattern:    pattern,
+		FirstBlock: 1,
+		LastBlock:  trusted.Number.Uint64(),
+		Limit:      math.MaxUint64,
+	}, opts)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
+	verified := verifiedRes.Logs
 	if len(verified) != len(result.Logs) {
 		t.Fatalf("verified %d logs, want %d", len(verified), len(result.Logs))
 	}
@@ -167,12 +180,17 @@ func TestPurethGetLogsWithProof(t *testing.T) {
 	if err := json.Unmarshal(encHist, &histProof); err != nil {
 		t.Fatal(err)
 	}
-	histVerified, err := histProof.Verify(logIndexProverBackend{bc})
+	histRes, err := histProof.Verify(bc.GetHeaderByNumber(refNumber), logquery.FilterQuery{
+		Pattern:    pattern,
+		FirstBlock: 1,
+		LastBlock:  refNumber,
+		Limit:      math.MaxUint64,
+	}, opts)
 	if err != nil {
 		t.Fatalf("historical verify: %v", err)
 	}
-	if len(histVerified) != len(histResult.Logs) {
-		t.Fatalf("historical verified %d logs, want %d", len(histVerified), len(histResult.Logs))
+	if len(histRes.Logs) != len(histResult.Logs) {
+		t.Fatalf("historical verified %d logs, want %d", len(histRes.Logs), len(histResult.Logs))
 	}
 }
 

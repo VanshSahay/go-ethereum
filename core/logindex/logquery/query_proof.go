@@ -17,8 +17,10 @@
 package logquery
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -27,98 +29,171 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/database"
 )
 
-// Verify checks the query proof end to end and returns the proven logs:
+// VerifyOptions configures the trust anchors of the verifier.
+type VerifyOptions struct {
+	// ChainConfig supplies the rules the index contract's get() executes under.
+	ChainConfig *params.ChainConfig
+
+	// IndexContracts lists the accepted index contracts. The value is the code
+	// hash the contract must have in the reference state; the zero hash accepts
+	// any code.
+	IndexContracts map[common.Address]common.Hash
+}
+
+// DefaultVerifyOptions accepts exactly the protocol's index contract with its
+// reference bytecode.
+func DefaultVerifyOptions(config *params.ChainConfig) VerifyOptions {
+	return VerifyOptions{
+		ChainConfig: config,
+		IndexContracts: map[common.Address]common.Hash{
+			params.IndexContractAddress: crypto.Keccak256Hash(params.IndexContractCode),
+		},
+	}
+}
+
+// Result is the verified outcome of a query proof: the proven logs and the
+// block range the proof covers. The range can be narrower than the requested
+// one only when the result limit was reached.
+type Result struct {
+	Logs       []*types.Log
+	FirstBlock uint64
+	LastBlock  uint64
+}
+
+// Verify checks the query proof against a trusted reference header and the
+// query the caller asked for, and returns the proven logs:
 //
-//  1. the table proofs are adjacent and cover the query range;
-//  2. each table root is reconstructed from the proven entries and the
-//     multiproof hashes, and cross-checked against the index contract's
-//     stored root executed on the proof-reconstructed state;
-//  3. the block entries chain the proven blocks, with the last block of the
-//     last table anchored by the reference header;
-//  4. the receipts are decoded from the receipts trie proofs and every log
+//  1. the proof is anchored to the trusted header and answers the requested
+//     query (pattern, limit, direction) over a sub-range of the requested range;
+//  2. the table proofs are adjacent, use protocol table sizes at aligned first
+//     blocks and cover the proven range;
+//  3. each table root is reconstructed from the proven entries and the
+//     multiproof hashes, and cross-checked against the root stored in an
+//     accepted index contract, read from the trusted state;
+//  4. the block entries pin the proven block headers;
+//  5. the receipts are decoded from the receipts trie proofs and every log
 //     re-evaluated against the query pattern;
-//  5. the inclusion/exclusion cross-check: for every proven log position,
+//  6. the inclusion/exclusion cross-check: for every proven log position,
 //     the pattern's verdict must agree with the positions implied by the
 //     proven index entries — a claimed match needs an inclusion proof and a
 //     claimed non-match needs an exclusion proof.
-func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, error) {
+func (p *QueryProof) Verify(trusted *types.Header, req FilterQuery, opts VerifyOptions) (*Result, error) {
+	if trusted == nil || trusted.Number == nil {
+		return nil, errors.New("missing trusted reference header")
+	}
+	if p.RefHeader.Number == nil || p.RefHeader.Hash() != trusted.Hash() {
+		return nil, errors.New("proof reference header does not match the trusted header")
+	}
+	refNumber := trusted.Number.Uint64()
+	if refNumber == 0 {
+		return nil, errors.New("the genesis block cannot be a reference header")
+	}
+	if err := p.checkQuery(req, refNumber); err != nil {
+		return nil, err
+	}
 	if len(p.TableQueryProofs) == 0 {
 		return nil, errors.New("no table proofs")
 	}
-	for i := 1; i < len(p.TableQueryProofs); i++ {
-		prev, cur := &p.TableQueryProofs[i-1], &p.TableQueryProofs[i]
-		if prev.FirstBlock+prev.TableSize != cur.FirstBlock {
-			return nil, errors.New("table proofs are not adjacent")
+	if len(p.IndexContracts) > len(p.TableQueryProofs) {
+		return nil, errors.New("unused index contracts in proof")
+	}
+	// the tables must be valid, adjacent and cover the proven range; the
+	// parameters are validated before any arithmetic is done on them
+	paths := make([]tablePath, len(p.TableQueryProofs))
+	for i := range p.TableQueryProofs {
+		tqp := &p.TableQueryProofs[i]
+		path, err := checkTable(tqp.TableSize, tqp.FirstBlock, refNumber)
+		if err != nil {
+			return nil, err
+		}
+		paths[i] = path
+		if i > 0 {
+			prev := &p.TableQueryProofs[i-1]
+			if prev.FirstBlock+prev.TableSize != tqp.FirstBlock {
+				return nil, errors.New("table proofs are not adjacent")
+			}
 		}
 	}
 	first := p.TableQueryProofs[0].FirstBlock
 	lastTqp := &p.TableQueryProofs[len(p.TableQueryProofs)-1]
 	last := lastTqp.FirstBlock + lastTqp.TableSize - 1
-	if p.Query.FirstBlock < first {
-		return nil, errors.New("table proofs do not cover the query range")
-	}
-	queryLast := min(p.Query.LastBlock, p.RefHeader.Number.Uint64())
-	if queryLast > last {
+	if p.Query.FirstBlock < first || p.Query.LastBlock > last {
 		return nil, errors.New("table proofs do not cover the query range")
 	}
 	var (
-		allLogs       []*types.Log
-		totalResults  uint64
-		blockEntryOf  = make(map[uint64]common.Hash) // block number -> proven block hash
-		provenResults = make(map[uint64][]*types.Log)
+		allLogs      []*types.Log
+		blockEntryOf = make(map[uint64]common.Hash) // block number -> proven block hash
+		nodes        = toNodeMap(p.ContractProofNodes)
+		codes        = toNodeMap(p.ContractProofCodes)
 	)
 	for ti := range p.TableQueryProofs {
 		tqp := &p.TableQueryProofs[ti]
+		path := paths[ti]
 		tableRoot, err := tqp.calculateTableRoot()
 		if err != nil {
 			return nil, err
 		}
+		if int(tqp.IndexContract) >= len(p.IndexContracts) {
+			return nil, errors.New("index contract reference out of range")
+		}
 		contract := p.IndexContracts[tqp.IndexContract]
-		stateDb, err := state.New(p.RefHeader.Root, state.NewMPTDatabase(triedb.NewProofReader(toNodeMap(p.ContractProofNodes), &triedb.Config{}), state.NewProofCodeReader(toNodeMap(p.ContractProofCodes))))
+		codeHash, accepted := opts.IndexContracts[contract]
+		if !accepted {
+			return nil, errors.New("index contract is not accepted")
+		}
+		stateDb, err := state.New(p.RefHeader.Root, state.NewMPTDatabase(triedb.NewProofReader(nodes, &triedb.Config{}), state.NewProofCodeReader(codes)))
 		if err != nil {
 			return nil, err
 		}
-		// tables inside their get() confirmation delay read the root from the
-		// raw storage slot; older tables execute get() on the proven state
+		if codeHash != (common.Hash{}) && stateDb.GetCodeHash(contract) != codeHash {
+			return nil, errors.New("index contract code does not match")
+		}
 		var contractRoot common.Hash
-		if logindex.PublicationSchedule(tqp.TableSize, tqp.FirstBlock)+1 > p.RefHeader.Number.Uint64() {
-			contractRoot = getTableRootRaw(stateDb, contract, tqp.FirstBlock, tqp.TableSize)
+		if path == pathRaw {
+			contractRoot, err = getTableRootRaw(stateDb, contract, tqp.FirstBlock, tqp.TableSize)
 		} else {
-			contractRoot, err = getProvenTableRootState(stateDb, backend.ChainConfig(), &p.RefHeader, contract, tqp.FirstBlock, tqp.TableSize)
-			if err != nil {
-				return nil, err
-			}
+			contractRoot, err = getTableRoot(stateDb, opts.ChainConfig, &p.RefHeader, contract, tqp.FirstBlock, tqp.TableSize)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := stateDb.Error(); err != nil {
+			return nil, err
+		}
+		// an unset slot reads as the zero hash: a table the contract has no
+		// root for cannot be proven, not even as an empty one
+		if contractRoot == (common.Hash{}) {
+			return nil, errors.New("index contract has no root for the table")
 		}
 		if tableRoot != contractRoot {
 			return nil, errors.New("table root mismatch")
 		}
-		logs, blockHashes, _, results, err := tqp.verify(&p.Query, first, queryLast)
+		logs, blockHashes, _, _, err := tqp.verify(&p.Query, p.Query.FirstBlock, p.Query.LastBlock)
 		if err != nil {
 			return nil, err
 		}
 		allLogs = append(allLogs, logs...)
-		totalResults += uint64(len(logs))
 		for number, hash := range blockHashes {
+			if prev, ok := blockEntryOf[number]; ok && prev != hash {
+				return nil, errors.New("conflicting block entries")
+			}
 			blockEntryOf[number] = hash
-		}
-		for key, logs := range results {
-			provenResults[key] = logs
 		}
 	}
 	// the proven chain must reach the reference head: the last table proves
 	// the head's parent block entry, whose content and block number must
 	// match the reference header exactly
-	if blockEntryOf[p.RefHeader.Number.Uint64()-1] != p.RefHeader.ParentHash {
+	if blockEntryOf[refNumber-1] != p.RefHeader.ParentHash {
 		return nil, errors.New("proven chain does not reach the reference head")
 	}
 	// every block result's header must be pinned by a proven block entry; the
@@ -126,6 +201,9 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 	for ti := range p.TableQueryProofs {
 		tqp := &p.TableQueryProofs[ti]
 		for i := range tqp.BlockResults {
+			if tqp.BlockResults[i].Header.Number == nil {
+				return nil, errors.New("block result without a number")
+			}
 			if tqp.BlockResults[i].Header.Hash() == p.RefHeader.Hash() {
 				continue // anchored by the reference header
 			}
@@ -135,16 +213,41 @@ func (p *QueryProof) Verify(backend contractVerifierBackend) ([]*types.Log, erro
 			}
 		}
 	}
-	return allLogs, nil
+	return &Result{Logs: allLogs, FirstBlock: p.Query.FirstBlock, LastBlock: p.Query.LastBlock}, nil
 }
 
-// countResults sums the per-table result counts.
-func countResults(p *QueryProof) int {
-	var count int
-	for i := range p.TableQueryProofs {
-		count += int(p.TableQueryProofs[i].ResultCount)
+// checkQuery binds the proof to the query the caller asked for: the pattern,
+// limit and direction must be the requested ones and the proven range must lie
+// inside the requested range.
+func (p *QueryProof) checkQuery(req FilterQuery, refNumber uint64) error {
+	if req.Pattern == nil || p.Query.Pattern == nil {
+		return errors.New("missing query pattern")
 	}
-	return count
+	want, err := json.Marshal(normalizePattern(req.Pattern))
+	if err != nil {
+		return err
+	}
+	got, err := json.Marshal(normalizePattern(p.Query.Pattern))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(want, got) {
+		return errors.New("proof answers a different pattern")
+	}
+	if p.Query.Limit != req.Limit || p.Query.LimitLatest != req.LimitLatest {
+		return errors.New("proof answers a different limit")
+	}
+	if req.Limit == 0 {
+		return errors.New("zero result limit")
+	}
+	reqLast := min(req.LastBlock, refNumber)
+	if req.FirstBlock > reqLast {
+		return errors.New("empty query range")
+	}
+	if p.Query.FirstBlock > p.Query.LastBlock || p.Query.FirstBlock < req.FirstBlock || p.Query.LastBlock > reqLast {
+		return errors.New("proven range is outside the requested range")
+	}
+	return nil
 }
 
 func toNodeMap(list []hexutil.Bytes) map[common.Hash][]byte {
@@ -173,6 +276,7 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 		provenBlocks = make(map[uint64]common.Hash)
 		provenTxs    = make(map[uint64]txMeta)
 	)
+	last := tqp.FirstBlock + tqp.TableSize - 1
 	for i, entryIndex := range tqp.EntryIndices {
 		if i > 0 && entryIndex <= tqp.EntryIndices[i-1] {
 			return nil, nil, nil, nil, errors.New("entry indices are not strictly ascending")
@@ -180,17 +284,43 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 		if entryIndex >= tqp.EntryCount {
 			return nil, nil, nil, nil, errors.New("entry index out of range")
 		}
+		if i > 0 && types.CompareEntries(tqp.ProvenEntries[i-1], tqp.ProvenEntries[i]) >= 0 {
+			return nil, nil, nil, nil, errors.New("proven entries are not strictly ascending")
+		}
 		typ, content, blockNum, txIdx, logIdx, err := types.EntryFields(tqp.ProvenEntries[i])
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
+		// a table holds the block entries of the blocks before its own blocks
+		// (the entry of block n lives in the table that contains block n+1) and
+		// the transaction and log entries of its own blocks
+		if blockNum == math.MaxUint64 {
+			return nil, nil, nil, nil, errors.New("entry block number out of range")
+		}
 		switch typ {
 		case types.EntryTypeBlock:
+			if blockNum+1 < tqp.FirstBlock || blockNum+1 > last {
+				return nil, nil, nil, nil, errors.New("block entry outside the table range")
+			}
+			if _, dup := provenBlocks[blockNum]; dup {
+				return nil, nil, nil, nil, errors.New("duplicate block entry")
+			}
 			provenBlocks[blockNum] = common.Hash(content)
 		case types.EntryTypeTransaction:
+			if blockNum < tqp.FirstBlock || blockNum > last {
+				return nil, nil, nil, nil, errors.New("transaction entry outside the table range")
+			}
+			key := uint64(blockNum)<<32 | uint64(txIdx)
+			if _, dup := provenTxs[key]; dup {
+				return nil, nil, nil, nil, errors.New("duplicate transaction entry")
+			}
 			// the transaction entry's log index field carries the cumulative
 			// log count of the block before the transaction
-			provenTxs[uint64(blockNum)<<32|uint64(txIdx)] = txMeta{hash: common.Hash(content), logOffset: logIdx}
+			provenTxs[key] = txMeta{hash: common.Hash(content), logOffset: logIdx}
+		default:
+			if blockNum < tqp.FirstBlock || blockNum > last {
+				return nil, nil, nil, nil, errors.New("log entry outside the table range")
+			}
 		}
 	}
 	var (
@@ -200,6 +330,9 @@ func (tqp *tableQueryProof) verify(query *FilterQuery, queryFirst, queryLast uin
 	)
 	for i := range tqp.BlockResults {
 		br := &tqp.BlockResults[i]
+		if br.Header.Number == nil {
+			return nil, nil, nil, nil, errors.New("block result without a number")
+		}
 		number := br.Header.Number.Uint64()
 		if number < tqp.FirstBlock || number >= tqp.FirstBlock+tqp.TableSize {
 			return nil, nil, nil, nil, errors.New("block result outside the table range")

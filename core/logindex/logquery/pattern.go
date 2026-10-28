@@ -20,9 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
 	"math"
 	"slices"
+	"sort"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -226,6 +226,35 @@ func NewPatternMatcherFromJSON(msg json.RawMessage) (PatternMatcher, error) {
 		return m, nil
 	}
 	return nil, errors.New("empty pattern matcher is not allowed")
+}
+
+// normalizePattern collapses single-element combinators so that equivalent
+// patterns written differently (for example a lone leaf versus the allOf/anyOf
+// nesting an eth_getLogs style filter is lowered to) compare equal.
+func normalizePattern(m PatternMatcher) PatternMatcher {
+	switch m := m.(type) {
+	case matchAny:
+		children := make(matchAny, len(m))
+		for i, child := range m {
+			children[i] = normalizePattern(child)
+		}
+		if len(children) == 1 {
+			return children[0]
+		}
+		return children
+	case matchAll:
+		children := make(matchAll, len(m))
+		for i, child := range m {
+			children[i] = normalizePattern(child)
+		}
+		if len(children) == 1 {
+			return children[0]
+		}
+		return children
+	case *offsetMatcher:
+		return &offsetMatcher{child: normalizePattern(m.child), offset: m.offset}
+	}
+	return m
 }
 
 // NewLegacyMatcher builds a pattern from eth_getLogs style filter criteria:

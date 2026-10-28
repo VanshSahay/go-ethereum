@@ -25,6 +25,20 @@ head_number() {
   cast block-number --rpc-url "$RPC"
 }
 
+# verify_proof <proof.json> <topic0> [tamper <index>] runs the standalone
+# verifier. The trusted reference hash comes from the node's own block (a light
+# client would take it from its header chain) and the query file is the request
+# the proof must answer.
+verify_proof() {
+  local proof=$1 topic=$2
+  shift 2
+  local ref_number ref_hash
+  ref_number=$(jq -r '.refHeader.number' "$proof")
+  ref_hash=$(cast block "$((ref_number))" --rpc-url "$RPC" --json | jq -r .hash)
+  printf '{"pattern":{"field":"topics[0]","value":"%s"},"firstBlock":%d,"lastBlock":%d,"limit":18446744073709551615,"limitLatest":false}' "$topic" "$FROM" "$TO" > "$OUT/query.json"
+  ( cd "$REPO" && go run ./devnet/eip8304/cmd/verify -network devnet -ref-hash "$ref_hash" -query "$OUT/query.json" "$proof" "$@" )
+}
+
 echo "== waiting for the index to accumulate blocks =="
 TARGET=$((DEPLOY + 360))
 while true; do
@@ -82,13 +96,13 @@ echo "parity: all $N_PURETH logs identical"
 echo
 echo "== independent proof verification =="
 jq '.proof' "$OUT/result.json" > "$OUT/proof.json"
-( cd "$REPO" && go run ./devnet/eip8304/cmd/verify "$OUT/proof.json" )
+verify_proof "$OUT/proof.json" "$TRANSFER"
 
 echo
 echo "== tamper demos (each modified proof must be rejected) =="
 for IDX in 0 40 90; do
   echo "--- tamper index $IDX"
-  if ( cd "$REPO" && go run ./devnet/eip8304/cmd/verify "$OUT/proof.json" tamper "$IDX" ); then
+  if verify_proof "$OUT/proof.json" "$TRANSFER" tamper "$IDX"; then
     echo "TAMPER DEMO FAILED: tampered proof verified" >&2
     exit 1
   fi
@@ -102,7 +116,7 @@ cast rpc --rpc-url "$RPC" pureth_getLogsWithProofV1 "$ABSENT_PARAMS" > "$OUT/abs
 N_ABSENT=$(jq '.logs | length' "$OUT/absent.json")
 echo "absent-topic logs: $N_ABSENT"
 jq '.proof' "$OUT/absent.json" > "$OUT/absent_proof.json"
-( cd "$REPO" && go run ./devnet/eip8304/cmd/verify "$OUT/absent_proof.json" )
+verify_proof "$OUT/absent_proof.json" "$DEAD"
 
 echo
 echo "== restart resilience (file-backed indexer reload) =="

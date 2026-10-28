@@ -16,7 +16,8 @@ import (
 func TestMidRangeQuery(t *testing.T) {
 	rtc := newRTChain(t, 40)
 	v := &rtView{rtc}
-	backend := &rtBackend{bc: rtc.bc}
+	opts := DefaultVerifyOptions(rtc.bc.Config())
+	trusted := rtc.bc.CurrentBlock()
 
 	emitterAddr := crypto.CreateAddress(rtSender, 1)
 	matcher, err := NewLegacyMatcher([]common.Address{emitterAddr}, nil)
@@ -25,13 +26,14 @@ func TestMidRangeQuery(t *testing.T) {
 	}
 	run := func(name string, lastBlock, limit uint64, latest bool, exact bool) {
 		t.Helper()
-		logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, FilterQuery{
+		req := FilterQuery{
 			Pattern:     matcher,
 			FirstBlock:  1,
 			LastBlock:   lastBlock,
 			Limit:       limit,
 			LimitLatest: latest,
-		}, true)
+		}
+		logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, req, true)
 		if err != nil {
 			t.Fatalf("%s: get matches: %v", name, err)
 		}
@@ -43,10 +45,11 @@ func TestMidRangeQuery(t *testing.T) {
 		if err := json.Unmarshal(enc, &decoded); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		verified, err := decoded.Verify(backend)
+		res, err := decoded.Verify(trusted, req, opts)
 		if err != nil {
 			t.Fatalf("%s: verify: %v", name, err)
 		}
+		verified := res.Logs
 		if exact && len(verified) != len(logs) {
 			t.Fatalf("%s: verified %d logs, want %d", name, len(verified), len(logs))
 		}
@@ -64,23 +67,24 @@ func TestMidRangeQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, FilterQuery{
+	absentReq := FilterQuery{
 		Pattern:    absent,
 		FirstBlock: 1,
 		LastBlock:  40,
 		Limit:      rtMaxUint64,
-	}, true)
+	}
+	logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), v, absentReq, true)
 	if err != nil {
 		t.Fatalf("absent: get matches: %v", err)
 	}
 	if len(logs) != 0 {
 		t.Fatalf("absent: %d logs, want 0", len(logs))
 	}
-	verified, err := proof.Verify(backend)
+	res, err := proof.Verify(trusted, absentReq, opts)
 	if err != nil {
 		t.Fatalf("absent: verify: %v", err)
 	}
-	if len(verified) != 0 {
-		t.Fatalf("absent: %d verified, want 0", len(verified))
+	if len(res.Logs) != 0 {
+		t.Fatalf("absent: %d verified, want 0", len(res.Logs))
 	}
 }

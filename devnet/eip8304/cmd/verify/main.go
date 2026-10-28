@@ -1,46 +1,76 @@
 // verify is a standalone EIP-8304 query proof verifier: it reads a proof JSON
 // produced by pureth_getLogsWithProofV1 (or any other prover), verifies it end
-// to end and prints the proven logs. It never talks to a node: the proof and
-// the reference header it is anchored to are the only inputs.
+// to end against a trusted reference block hash and the query the caller asked
+// for, and prints the proven logs. It never talks to a node.
 //
 // Usage:
 //
-//	go run ./devnet/eip8304/cmd/verify <proof.json> [tamper <index>]
+//	verify -ref-hash <hash> -query <query.json> [-network mainnet|sepolia|devnet] <proof.json> [tamper <index>]
 //
-// With the tamper argument the JSON blob at the given index of the raw proof
-// document is flipped, demonstrating that verification rejects modified
-// proofs.
+// The query file holds the request: {"pattern": {...}, "firstBlock": n,
+// "lastBlock": n, "limit": n, "limitLatest": bool}. With the tamper argument
+// one byte of the proof material at the given index is flipped, demonstrating
+// that verification rejects modified proofs.
 package main
 
 import (
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/logindex/logquery"
 	"github.com/ethereum/go-ethereum/params"
 )
 
-// devnetBackend satisfies the verifier's config lookup. The contract's get()
-// executes identically on any modern rule set; the test config has every fork
-// active from genesis so small devnet block numbers do not replay old rules.
-type devnetBackend struct{}
-
-func (devnetBackend) ChainConfig() *params.ChainConfig { return params.MergedTestChainConfig }
+// networkConfig resolves the chain config the index contract's get() executes
+// under. The devnet config has every fork active from genesis so small devnet
+// block numbers do not replay old rules.
+func networkConfig(name string) (*params.ChainConfig, error) {
+	switch name {
+	case "mainnet":
+		return params.MainnetChainConfig, nil
+	case "sepolia":
+		return params.SepoliaChainConfig, nil
+	case "devnet":
+		return params.MergedTestChainConfig, nil
+	}
+	return nil, fmt.Errorf("unknown network %q", name)
+}
 
 func main() {
-	if len(os.Args) < 2 {
-		fatal("usage: verify <proof.json> [tamper <index>]")
+	var (
+		refHash = flag.String("ref-hash", "", "trusted reference block hash the proof is anchored to")
+		queryFn = flag.String("query", "", "file with the requested query")
+		network = flag.String("network", "mainnet", "chain config: mainnet, sepolia or devnet")
+	)
+	flag.Parse()
+	args := flag.Args()
+	if len(args) < 1 || *refHash == "" || *queryFn == "" {
+		fatal("usage: verify -ref-hash <hash> -query <query.json> [-network n] <proof.json> [tamper <index>]")
 	}
-	raw, err := os.ReadFile(os.Args[1])
+	config, err := networkConfig(*network)
 	if err != nil {
 		fatal(err)
 	}
-	if len(os.Args) == 4 && os.Args[2] == "tamper" {
+	queryBlob, err := os.ReadFile(*queryFn)
+	if err != nil {
+		fatal(err)
+	}
+	var req logquery.FilterQuery
+	if err := json.Unmarshal(queryBlob, &req); err != nil {
+		fatal(err)
+	}
+	raw, err := os.ReadFile(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	if len(args) == 3 && args[1] == "tamper" {
 		var idx int
-		if _, err := fmt.Sscanf(os.Args[3], "%d", &idx); err != nil {
+		if _, err := fmt.Sscanf(args[2], "%d", &idx); err != nil {
 			fatal(err)
 		}
 		raw, err = tamper(raw, idx)
@@ -52,7 +82,13 @@ func main() {
 	if err := json.Unmarshal(raw, &proof); err != nil {
 		fatal(err)
 	}
-	logs, err := proof.Verify(devnetBackend{})
+	// the header embedded in the proof is only used once its hash matches the
+	// trusted one
+	if proof.RefHeader.Hash() != common.HexToHash(*refHash) {
+		fmt.Printf("VERIFY: FAIL: proof reference header %s is not the trusted %s\n", proof.RefHeader.Hash().Hex(), *refHash)
+		os.Exit(1)
+	}
+	res, err := proof.Verify(&proof.RefHeader, req, logquery.DefaultVerifyOptions(config))
 	if err != nil {
 		fmt.Printf("VERIFY: FAIL: %v\n", err)
 		os.Exit(1)
@@ -60,11 +96,11 @@ func main() {
 	ref := proof.RefHeader
 	fmt.Printf("VERIFY: PASS\n")
 	fmt.Printf("reference: block #%d %s\n", ref.Number, ref.Hash().Hex())
-	fmt.Printf("query range: %d..%d, tables: %d\n", proof.Query.FirstBlock, proof.Query.LastBlock, len(proof.TableQueryProofs))
-	fmt.Printf("proven logs: %d\n", len(logs))
-	for i, l := range logs {
+	fmt.Printf("proven range: %d..%d, tables: %d\n", res.FirstBlock, res.LastBlock, len(proof.TableQueryProofs))
+	fmt.Printf("proven logs: %d\n", len(res.Logs))
+	for i, l := range res.Logs {
 		if i >= 5 {
-			fmt.Printf("  ... and %d more\n", len(logs)-5)
+			fmt.Printf("  ... and %d more\n", len(res.Logs)-5)
 			break
 		}
 		fmt.Printf("  block #%d tx %s index %d addr %s\n", l.BlockNumber, l.TxHash.Hex()[:18]+"…", l.Index, l.Address.Hex()[:12]+"…")
