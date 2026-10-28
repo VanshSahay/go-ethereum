@@ -204,6 +204,42 @@ type simulator struct {
 	traceTransfers bool
 	validate       bool
 	fullTx         bool
+
+	// simulated holds the blocks simulated so far by hash: the part of the
+	// ancestry of a later block that the chain does not know.
+	simulated map[common.Hash]*simulatedBlock
+}
+
+// simulatedBlock is a finished simulated block as later blocks see it in
+// their ancestry.
+type simulatedBlock struct {
+	header   *types.Header
+	receipts types.Receipts
+}
+
+// simAncestry serves the ancestry of a simulated block to the EIP-8304 table
+// derivation: earlier simulated blocks first, then the canonical chain.
+type simAncestry struct {
+	ctx context.Context
+	sim *simulator
+}
+
+func (a simAncestry) GetHeader(hash common.Hash, number uint64) *types.Header {
+	if sb, ok := a.sim.simulated[hash]; ok {
+		return sb.header
+	}
+	header, err := a.sim.b.HeaderByHash(a.ctx, hash)
+	if err != nil || header == nil || header.Number.Uint64() != number {
+		return nil
+	}
+	return header
+}
+
+func (a simAncestry) GetIndexReceipts(hash common.Hash, number uint64) (types.Receipts, error) {
+	if sb, ok := a.sim.simulated[hash]; ok {
+		return sb.receipts, nil
+	}
+	return a.sim.b.GetReceipts(a.ctx, hash)
 }
 
 // execute runs the simulation of a series of blocks.
@@ -224,6 +260,7 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 	// this makes sure resources are cleaned up.
 	defer cancel()
 
+	sim.simulated = make(map[common.Hash]*simulatedBlock)
 	var err error
 	blocks, err = sim.sanitizeChain(blocks)
 	if err != nil {
@@ -393,11 +430,15 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		header.BlobGasUsed = &blobGasUsed
 	}
 
-	// Process EIP-7685 requests; EIP-8304 tables are nil here, wired in a later PR
-	// EIP-8304: stateless level-0 index root, exact for single-block simulation.
+	// Process EIP-7685 requests; EIP-8304: the index tables derived from the
+	// chain and the blocks simulated before this one.
 	var tablesToWrite []core.TableWrite
 	if sim.chainConfig.IsEIP8304(header.Number, header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		tablesToWrite = core.BuildLogIndexForBlock(header.Number.Uint64(), header.ParentHash, receipts)
+		var err error
+		tablesToWrite, err = core.DeriveLogIndexWrites(simAncestry{ctx, sim}, sim.chainConfig, header.Number.Uint64(), header.ParentHash, receipts)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	requests, bal, err := core.PostExecution(ctx, sim.chainConfig, header.Number, header.Time, allLogs, tablesToWrite, evm, uint32(len(block.Calls)+1))
 	if err != nil {
@@ -427,6 +468,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	b := core.AssembleBlock(chainHeadReader, header, sim.state, blockBody, receipts, blockAccessList)
 
 	repairLogs(callResults, b.Hash())
+	sim.simulated[b.Hash()] = &simulatedBlock{header: b.Header(), receipts: receipts}
 	return b, callResults, senders, nil
 }
 
