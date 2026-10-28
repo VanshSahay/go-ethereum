@@ -87,6 +87,12 @@ type runSource interface {
 	// runSize estimates the number of entries of the given (type, content)
 	// pair within [begin, end] without reading them.
 	runSize(typ uint32, content []byte, begin, end types.IndexPosition) (int, bool)
+
+	// takeBroadErr clears and reports a pending "query is too broad" error, and
+	// restoreBroadErr puts it back. An allOf uses them to survive a child whose
+	// run is over the cap while another child can bound the pattern.
+	takeBroadErr() bool
+	restoreBroadErr()
 }
 
 // matcherValue is the searchable content of a leaf matcher: an entry type plus
@@ -505,13 +511,20 @@ func (m matchAll) candidates(src runSource, begin, end types.IndexPosition) (ind
 	var (
 		children []child
 		bestLen  = -1
+		sawBroad bool
 	)
 	for _, i := range order {
 		if known && bestLen >= 0 && estimates[i] >= bestLen*receiptCost {
 			continue
 		}
 		from := src.mark()
-		if set, ok := m[i].candidates(src, begin, end); ok {
+		set, ok := m[i].candidates(src, begin, end)
+		if src.takeBroadErr() {
+			sawBroad = true
+			src.drop(from, src.mark())
+			continue
+		}
+		if ok {
 			children = append(children, child{set, from, src.mark()})
 			if bestLen < 0 || len(set) < bestLen {
 				bestLen = len(set)
@@ -519,6 +532,9 @@ func (m matchAll) candidates(src runSource, begin, end types.IndexPosition) (ind
 		}
 	}
 	if len(children) == 0 {
+		if sawBroad {
+			src.restoreBroadErr()
+		}
 		return nil, false
 	}
 	runCost := func(c child) int { return c.to - c.from }

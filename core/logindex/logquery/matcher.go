@@ -335,6 +335,16 @@ func (rs *readerSource) drop(from, to int) {
 	rs.touched = slices.Delete(rs.touched, from, to)
 }
 
+func (rs *readerSource) takeBroadErr() bool {
+	if rs.err == ErrQueryTooBroad {
+		rs.err = nil
+		return true
+	}
+	return false
+}
+
+func (rs *readerSource) restoreBroadErr() { rs.err = ErrQueryTooBroad }
+
 func (rs *readerSource) runSize(typ uint32, content []byte, begin, end types.IndexPosition) (int, bool) {
 	if rs.err != nil {
 		return 0, false

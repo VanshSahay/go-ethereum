@@ -141,6 +141,9 @@ func (tqp *tableQueryProof) drop(int, int) {}
 
 // runSize implements runSource: the verifier cannot estimate, so it evaluates
 // every child of a pattern.
+func (tqp *tableQueryProof) takeBroadErr() bool { return false }
+func (tqp *tableQueryProof) restoreBroadErr()   {}
+
 func (tqp *tableQueryProof) runSize(uint32, []byte, types.IndexPosition, types.IndexPosition) (int, bool) {
 	return 0, false
 }
