@@ -103,6 +103,7 @@ func newRTChainWith(t testing.TB, blocks int, code []byte, txsPerBlock func(bloc
 	if _, err := bc.InsertChain(genBlocks); err != nil {
 		t.Fatalf("insert chain: %v", err)
 	}
+	bc.SyncLogIndex()
 	return &rtChain{bc: bc, matcher: NewMatcher(bc.LogIndex(), &rtBackend{bc: bc})}
 }
 

@@ -377,7 +377,11 @@ type BlockChain struct {
 	validator  Validator // Block and state validator interface
 	prefetcher Prefetcher
 	processor  Processor         // Block transaction processor interface
-	logIndex   *logindex.Indexer // EIP-8304 index table producer and store, nil when disabled
+	logIndex   *logindex.Indexer // EIP-8304 index table store serving queries, nil when disabled
+
+	logIndexMu   sync.Mutex     // serializes reconciliations of the log index
+	logIndexQuit chan struct{}  // closed to stop the log index follower
+	logIndexWg   sync.WaitGroup // tracks the log index follower
 	logger     *tracing.Hooks
 
 	lastForkReadyAlert time.Time     // Last time there was a fork readiness print out
@@ -600,6 +604,9 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 	}
 
 	// Start tx indexer if it's enabled.
+	if bc.logIndex != nil {
+		bc.startLogIndexer()
+	}
 	if bc.cfg.TxLookupLimit >= 0 {
 		bc.txIndexer = newTxIndexer(uint64(bc.cfg.TxLookupLimit), bc)
 	}
@@ -1379,9 +1386,7 @@ func (bc *BlockChain) stopWithoutSaving() {
 
 	// Stop the log index: its merge thread winds down and the in-memory
 	// small tables are flushed to disk before the process exits.
-	if bc.logIndex != nil {
-		bc.logIndex.Stop()
-	}
+	bc.stopLogIndexer()
 
 	// Now wait for all chain modifications to end and persistent goroutines to exit.
 	//
@@ -1794,23 +1799,6 @@ func (bc *BlockChain) LogIndex() *logindex.Indexer {
 	return bc.logIndex
 }
 
-// indexBlock feeds a newly canonical block to the log index, rewinding it
-// first when the feed moved the index head backwards or onto another fork.
-func (bc *BlockChain) indexBlock(block *types.Block, receipts []*types.Receipt) {
-	if bc.logIndex == nil {
-		return
-	}
-	if n := bc.logIndex.HeadBlock(); block.NumberU64() < n ||
-		(block.NumberU64() == n && bc.logIndex.HeadHash() != block.Hash()) {
-		bc.logIndex.Revert(block.Header())
-	}
-	var body *types.Body
-	if b := bc.GetBlock(block.Hash(), block.NumberU64()); b != nil {
-		body = b.Body()
-	}
-	bc.logIndex.AddBlockData(block.Header(), body, receipts)
-}
-
 // writeBlockAndSetHead is the internal implementation of WriteBlockAndSetHead.
 // This function expects the chain mutex to be held.
 func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types.Receipt, logs []*types.Log, state *state.StateDB, emitHeadEvent bool) (status WriteStatus, err error) {
@@ -1828,8 +1816,6 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 
 	// Set new head.
 	bc.writeHeadBlock(block)
-
-	bc.indexBlock(block, receipts)
 
 	bc.chainFeed.Send(ChainEvent{
 		Header:       block.Header(),
@@ -2868,8 +2854,6 @@ func (bc *BlockChain) SetCanonical(head *types.Block) (common.Hash, error) {
 
 	// Emit events
 	receipts, logs := bc.collectReceiptsAndLogs(head, false)
-	bc.indexBlock(head, receipts)
-
 	bc.chainFeed.Send(ChainEvent{
 		Header:       head.Header(),
 		Receipts:     receipts,

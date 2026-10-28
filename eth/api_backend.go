@@ -512,6 +512,8 @@ func (b *EthAPIBackend) RPCTxFeeCap() float64 {
 // LogIndexMatcher returns the trustless log index query matcher, or nil when
 // the log index is disabled.
 func (b *EthAPIBackend) LogIndexMatcher() *logquery.Matcher {
+	// the index follows the head asynchronously; bring it up to date for the query
+	b.eth.blockchain.SyncLogIndex()
 	ix := b.eth.blockchain.LogIndex()
 	if ix == nil {
 		return nil

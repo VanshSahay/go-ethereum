@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -94,6 +95,26 @@ func TestLogIndexDerivationIndependentOfIndexer(t *testing.T) {
 		}
 		if head := bc.CurrentBlock(); head.Hash() != side[len(side)-1].Hash() {
 			t.Errorf("%s: head %d is not the side chain tip", name, head.Number)
+		}
+		// the follower brings the index onto the side chain: every table of the
+		// head's range belongs to the canonical chain
+		if bc.LogIndex() != nil {
+			bc.SyncLogIndex()
+			ix := bc.LogIndex()
+			if ix.HeadHash() != bc.CurrentBlock().Hash() {
+				t.Errorf("%s: index head %x, chain head %x", name, ix.HeadHash(), bc.CurrentBlock().Hash())
+			}
+			headNum := bc.CurrentBlock().Number.Uint64()
+			readers := ix.GetRangeReaders(bc.CurrentBlock().Hash(), common.NewRange[uint64](1, headNum), 0)
+			if len(readers) == 0 {
+				t.Errorf("%s: no tables for the canonical range", name)
+			}
+			for _, tr := range readers {
+				last := tr.Meta.LastBlockNumber
+				if want := bc.GetCanonicalHash(last); tr.Meta.LastBlockHash != want {
+					t.Errorf("%s: table ending at %d is on hash %x, canonical %x", name, last, tr.Meta.LastBlockHash, want)
+				}
+			}
 		}
 		bc.Stop()
 	}
