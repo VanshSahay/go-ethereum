@@ -127,7 +127,16 @@ func expectedMatches(rtc *rtChain, dp diffPattern, first, last uint64) []expecte
 // force over many patterns, ranges, limits and directions, on a chain whose
 // blocks hold one to three calls of an emitter with a known log layout.
 func TestDifferentialQueries(t *testing.T) {
+	// the default windows cover the whole test chain at once; tiny windows
+	// exercise the window boundaries of the scan
+	for _, window := range []uint64{0, 1, 5} {
+		t.Run(fmt.Sprintf("window=%d", window), func(t *testing.T) { testDifferentialQueries(t, window) })
+	}
+}
+
+func testDifferentialQueries(t *testing.T, window uint64) {
 	rtc := newRTChainWith(t, 40, diffEmitterCode(), func(block int) int { return block%3 + 1 })
+	rtc.matcher.ScanWindow = window
 	emitter := crypto.CreateAddress(rtSender, 1)
 	trusted := rtc.bc.CurrentBlock()
 	opts := DefaultVerifyOptions(rtc.bc.Config())
@@ -221,5 +230,46 @@ func checkLogs(t *testing.T, name string, got []*types.Log, want []expectedLog) 
 			t.Errorf("%s: log %d is %+v, want %+v", name, i, have[i], want[i])
 			return
 		}
+	}
+}
+
+// TestBroadQueryWithSmallLimit pins that a query whose pattern matches far more
+// candidates than the matcher is willing to derive still works when its limit
+// is reached early, and fails only when the cap is really exceeded.
+func TestBroadQueryWithSmallLimit(t *testing.T) {
+	rtc := newRTChainWith(t, 40, diffEmitterCode(), func(block int) int { return block%3 + 1 })
+	emitter := crypto.CreateAddress(rtSender, 1)
+	pattern, err := NewPatternMatcherFromJSON(json.RawMessage(addrLeaf(emitter)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, opts := rtc.bc.CurrentBlock(), DefaultVerifyOptions(rtc.bc.Config())
+
+	// the address matches 4 logs per call and 1-3 calls per block: well over
+	// 60 candidates in the first 10 blocks, so a cap of 100 per window of 4
+	// blocks is enough for a small limit but not for the whole range
+	rtc.matcher.MaxCandidates = 100
+	rtc.matcher.ScanWindow = 4
+	for _, latest := range []bool{false, true} {
+		req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: 39, Limit: 5, LimitLatest: latest}
+		logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
+		if err != nil {
+			t.Fatalf("latest=%v: %v", latest, err)
+		}
+		if len(logs) != 5 {
+			t.Fatalf("latest=%v: %d logs, want 5", latest, len(logs))
+		}
+		res, err := proof.Verify(trusted, req, opts)
+		if err != nil {
+			t.Fatalf("latest=%v: verify: %v", latest, err)
+		}
+		if len(res.Logs) != 5 {
+			t.Errorf("latest=%v: verified %d logs", latest, len(res.Logs))
+		}
+	}
+	// without a limit the whole range has to be derived and the cap bites
+	req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: 39, Limit: 10_000}
+	if _, _, _, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true); err == nil {
+		t.Error("an unlimited broad query was served past the candidate cap")
 	}
 }

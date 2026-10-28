@@ -102,6 +102,10 @@ type Matcher struct {
 	// scan may derive: a query matching more than that is too broad to serve.
 	MaxCandidates int
 
+	// ScanWindow is the number of blocks of the first window in which a scan
+	// derives candidates (zero for the default); it doubles with each window.
+	ScanWindow uint64
+
 	// Historic lists the out-of-protocol index contracts the matcher's index
 	// holds tables for; their roots are read without the publication schedule.
 	Historic map[common.Address]HistoricContract
@@ -192,6 +196,7 @@ func (mc *Matcher) GetMatches(ctx context.Context, chainView ChainView, query Fi
 			pattern:     query.Pattern,
 			reverse:     query.LimitLatest,
 			maxRun:      mc.MaxCandidates,
+			window:      mc.ScanWindow,
 			blockProofs: make(map[uint64]*blockProof),
 		}
 		begin := types.IndexPosition{BlockNumber: br.First()}
@@ -370,6 +375,7 @@ type matcherProcess struct {
 	pattern   PatternMatcher
 	reverse   bool
 	maxRun    int
+	window    uint64 // blocks in the first scan window, zero for the default
 
 	matches        []*types.Log // matching logs in scan order
 	blockProofs    map[uint64]*blockProof
@@ -380,67 +386,116 @@ type matcherProcess struct {
 	curLogsOffsets []uint32 // block-global log index of each transaction's first log
 }
 
-// scan evaluates the pattern on the table between begin and end. It stops
-// after the block in which the number of matches reaches limit has been fully
-// processed and returns that block number, or nil if the limit was not
-// reached.
+// scanWindow is the number of blocks of the first window of a scan; each
+// further window doubles.
+const scanWindow = 256
+
+// scan evaluates the pattern on the block range [begin, end] of the table in
+// scan order. The candidate positions are derived window by window, so a
+// query that reaches its limit early never derives the candidates of the rest
+// of the table. It returns the number of the block at which the limit was
+// reached and processed, or nil if it was not.
 func (mp *matcherProcess) scan(ctx context.Context, pattern PatternMatcher, begin, end types.IndexPosition, limit int) (*uint64, error) {
-	src := &readerSource{ctx: ctx, reader: mp.reader, record: mp.prover != nil, maxRun: mp.maxRun}
-	candidates, ok := pattern.candidates(src, begin, end)
-	if src.err != nil {
-		return nil, src.err
+	var (
+		first, last = begin.BlockNumber, end.BlockNumber
+		window      = mp.window
+		cut         *uint64
+		processed   int
+	)
+	if window == 0 {
+		window = scanWindow
 	}
-	if !ok {
-		return nil, errors.New("the pattern cannot be evaluated on the index")
-	}
-	if mp.maxRun > 0 && len(candidates) > mp.maxRun {
-		return nil, ErrQueryTooBroad
-	}
-	var cut *uint64
-	for n := range candidates {
-		pos := candidates[n]
+	for lo, hi := first, last; cut == nil && first <= last; {
+		// the next window in scan order: [wFirst, wLast]
+		var wFirst, wLast uint64
 		if mp.reverse {
-			pos = candidates[len(candidates)-1-n]
-		}
-		if cut != nil && pos.BlockNumber != *cut {
-			break
-		}
-		if n%256 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, err
+			wLast = hi
+			wFirst = first
+			if hi-first >= window {
+				wFirst = hi - window + 1
+			}
+		} else {
+			wFirst = lo
+			wLast = last
+			if last-lo >= window {
+				wLast = lo + window - 1
 			}
 		}
-		matched, err := mp.processCandidate(pos)
-		if err != nil {
-			return nil, err
+		wBegin, wEnd := begin, end
+		if wFirst != first {
+			wBegin = types.IndexPosition{BlockNumber: wFirst}
 		}
-		if matched && cut == nil && len(mp.matches) >= limit {
-			block := pos.BlockNumber
-			cut = &block
+		if wLast != last {
+			wEnd = types.IndexPosition{BlockNumber: wLast, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
 		}
+		src := &readerSource{ctx: ctx, reader: mp.reader, maxRun: mp.maxRun}
+		candidates, ok := pattern.candidates(src, wBegin, wEnd)
+		if src.err != nil {
+			return nil, src.err
+		}
+		if !ok {
+			return nil, errors.New("the pattern cannot be evaluated on the index")
+		}
+		if mp.maxRun > 0 && len(candidates) > mp.maxRun {
+			return nil, ErrQueryTooBroad
+		}
+		for n := range candidates {
+			pos := candidates[n]
+			if mp.reverse {
+				pos = candidates[len(candidates)-1-n]
+			}
+			if cut != nil && pos.BlockNumber != *cut {
+				break
+			}
+			if processed%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			processed++
+			matched, err := mp.processCandidate(pos)
+			if err != nil {
+				return nil, err
+			}
+			if matched && cut == nil && len(mp.matches) >= limit {
+				block := pos.BlockNumber
+				cut = &block
+			}
+		}
+		// advance to the next window and double its size
+		if mp.reverse {
+			if wFirst == first {
+				break
+			}
+			hi = wFirst - 1
+		} else {
+			if wLast == last {
+				break
+			}
+			lo = wLast + 1
+		}
+		window *= 2
 	}
 	if err := mp.finishBlock(); err != nil {
 		return nil, err
 	}
 	if mp.prover != nil {
-		touched := src.touched
+		// record the entries of the proven part of the table: all of it, or up
+		// to the cut block
+		recBegin, recEnd := begin, end
 		if cut != nil {
-			// only the part of the table up to the cut block is proven: record
-			// the entries of that shorter range instead
-			cutBegin, cutEnd := begin, end
 			if mp.reverse {
-				cutBegin = types.IndexPosition{BlockNumber: *cut}
+				recBegin = types.IndexPosition{BlockNumber: *cut}
 			} else {
-				cutEnd = types.IndexPosition{BlockNumber: *cut, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
+				recEnd = types.IndexPosition{BlockNumber: *cut, TxIndex: math.MaxUint32, LogIndex: math.MaxUint32}
 			}
-			cutSrc := &readerSource{ctx: ctx, reader: mp.reader, record: true, maxRun: mp.maxRun}
-			pattern.candidates(cutSrc, cutBegin, cutEnd)
-			if cutSrc.err != nil {
-				return nil, cutSrc.err
-			}
-			touched = cutSrc.touched
 		}
-		mp.prover.valueEntries = touched
+		recSrc := &readerSource{ctx: ctx, reader: mp.reader, record: true, maxRun: mp.maxRun}
+		pattern.candidates(recSrc, recBegin, recEnd)
+		if recSrc.err != nil {
+			return nil, recSrc.err
+		}
+		mp.prover.valueEntries = recSrc.touched
 	}
 	return cut, nil
 }
