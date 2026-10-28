@@ -139,7 +139,7 @@ func computeTableRoot(chain AncestorReader, isActive func(*types.Header) bool, n
 		header := headers[uint64(len(headers))-1-k]
 		receipts, err := chain.GetIndexReceipts(header.Hash(), firstBlock+k)
 		if err != nil {
-			return common.Hash{}, false, fmt.Errorf("EIP-8304: receipts of block %d: %w", firstBlock+k, err)
+			return common.Hash{}, false, fmt.Errorf("EIP-8304: receipts of block %d are needed to derive the due index table (history pruned or receipts not synced?): %w", firstBlock+k, err)
 		}
 		b.AddBlockEntries(header.ParentHash, firstBlock+k, receipts)
 	}

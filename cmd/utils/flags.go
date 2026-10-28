@@ -357,7 +357,7 @@ var (
 	}
 	LogIndexDisableFlag = &cli.BoolFlag{
 		Name:     "logindex.disable",
-		Usage:    "Do not maintain the EIP-8304 trustless log index (block validation is unaffected)",
+		Usage:    "Do not maintain the EIP-8304 trustless log index (block validation is unaffected: the index roots are derived from the chain, which needs the receipts of the last 319 blocks, so a node must keep at least these)",
 		Category: flags.StateCategory,
 	}
 	LogIndexHistoryFlag = &cli.Uint64Flag{
