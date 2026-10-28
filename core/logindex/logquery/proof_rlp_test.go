@@ -115,3 +115,34 @@ func TestAllOfProvesOnlyTheCheapestChild(t *testing.T) {
 		t.Errorf("address+topic proves %d entries, the topic alone %d", entries(both), entries(alone))
 	}
 }
+
+// TestQueriesAcrossRetainedLevels pins that retention does not break proofs:
+// on a chain older than the level-0 window the level-0 tables of old blocks
+// are gone, and both an old range (served by the higher levels) and a recent
+// one (served by the lowest) still prove and verify.
+func TestQueriesAcrossRetainedLevels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a chain past the level-0 retention window")
+	}
+	rtc := newRTChainWith(t, 1300, diffEmitterCode(), func(int) int { return 1 })
+	emitter := crypto.CreateAddress(rtSender, 1)
+	pattern, err := NewPatternMatcherFromJSON(json.RawMessage(fmt.Sprintf(`{"allOf":[%s,%s]}`, addrLeaf(emitter), topicLeaf(0, topicB))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, opts := rtc.bc.CurrentBlock(), DefaultVerifyOptions(rtc.bc.Config())
+	for _, rng := range [][2]uint64{{20, 200}, {1000, 1290}, {20, 1290}} {
+		req := FilterQuery{Pattern: pattern, FirstBlock: rng[0], LastBlock: rng[1], Limit: 10_000}
+		logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
+		if err != nil {
+			t.Fatalf("range %v: %v", rng, err)
+		}
+		res, err := proof.Verify(trusted, req, opts)
+		if err != nil {
+			t.Fatalf("range %v: verify: %v", rng, err)
+		}
+		if want := int(rng[1] - rng[0] + 1); len(logs) != want || len(res.Logs) != want {
+			t.Errorf("range %v: %d served, %d verified, want %d", rng, len(logs), len(res.Logs), want)
+		}
+	}
+}

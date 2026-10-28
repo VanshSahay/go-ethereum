@@ -279,22 +279,43 @@ func (ix *Indexer) updateTableOperations() {
 	}
 }
 
+// ringSlots is the number of table roots the index contract keeps per level.
+const ringSlots = 1024
+
 // makeTargetSet computes the tables worth having: every table whose block
-// range is fully covered by the indexed range is targeted at every level, so
-// the scheduler builds the complete pyramid bottom-up. The range starts at
-// block 1: the genesis block has no index table, so tables containing it
-// (level index 0 at every level above zero) are never targeted and can never
-// block the scheduler. Local tables are not pruned; retention is local policy,
-// the 1024-table rings live in the index contract.
+// range is fully covered by the retained range is targeted, so the scheduler
+// builds the complete pyramid bottom-up. The range starts at block 1: the
+// genesis block has no index table, so tables containing it (level index 0 at
+// every level above zero) are never targeted and can never block the
+// scheduler.
+//
+// A level only keeps the tables the index contract can still serve: the
+// contract holds 1024 roots per level, so a table older than 1025 table sizes
+// (plus the publication lag) is unprovable at its level and its range is
+// covered by the higher levels. The scheduler deletes complete tables outside
+// the target as soon as no incomplete higher-level table needs them as a
+// merge source, which cuts the storage of the lower levels to their windows.
+// Historic hierarchies keep everything: their contract has no ring.
 func (ix *Indexer) makeTargetSet(complete tableSet) tableSet {
 	if ix.headBlock == 0 {
 		return ix.params.newTableSet()
 	}
 	rangeStart := max(ix.tailBlock(), 1)
 	rangeEnd := max(ix.finalBlock, ix.headBlock)
-	blockRange := common.SingleRangeSet[uint64](common.NewRange[uint64](rangeStart, rangeEnd+1-rangeStart))
 	target := ix.params.newTableSet()
 	for i := len(ix.params.tableLevels) - 1; i >= 0; i-- {
+		start := rangeStart
+		if !ix.params.historic {
+			count := ix.params.tableLevels[i].blockCount
+			span := ringSlots*count + count + count/4
+			if ix.headBlock+1 > span {
+				start = max(start, ix.headBlock+1-span)
+			}
+		}
+		if start > rangeEnd {
+			continue
+		}
+		blockRange := common.SingleRangeSet[uint64](common.NewRange[uint64](start, rangeEnd+1-start))
 		target[i] = shiftRangeSetLevel(blockRange, ix.params.tableLevels[0], ix.params.tableLevels[i], false)
 	}
 	return target
