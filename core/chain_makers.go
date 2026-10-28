@@ -26,7 +26,6 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
-	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -327,13 +326,12 @@ func (b *BlockGen) collectRequests(readonly bool) (requests [][]byte, bal *bal.C
 	blockContext := NewEVMBlockContext(b.header, b.cm, &b.header.Coinbase)
 	evm := vm.NewEVM(blockContext, statedb, b.cm.config, vm.Config{})
 
-	// EIP-8304: the chain maker's own index producer runs the full
-	// publication schedule, so the generated blocks' system calls match a
-	// re-import of the same chain byte for byte.
+	// EIP-8304: the tables are derived from the generated history, exactly as
+	// a re-import of the chain does.
 	var tablesToWrite []TableWrite
 	if b.cm.config.IsEIP8304(b.header.Number, b.header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
 		var err error
-		tablesToWrite, err = b.cm.logIndex.TableWritesForBlock(b.header.Number.Uint64(), b.header.ParentHash, b.receipts)
+		tablesToWrite, err = DeriveLogIndexWrites(b.cm, b.cm.config, b.header.Number.Uint64(), b.header.ParentHash, b.receipts)
 		if err != nil {
 			panic(fmt.Sprintf("failed to build index tables: %v", err))
 		}
@@ -364,7 +362,7 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 	if engine == nil {
 		panic("nil consensus engine")
 	}
-	cm := newChainMaker(parent, config, engine)
+	cm := newChainMaker(parent, config, engine, db)
 
 	genblock := func(i int, parent *types.Block, triedb *triedb.Database, statedb *state.StateDB) (*types.Block, types.Receipts) {
 		b := &BlockGen{i: i, cm: cm, parent: parent, statedb: statedb, engine: engine}
@@ -510,12 +508,6 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		// Re-expand to ensure all receipts are returned.
 		receipts = receipts[:receiptsCount]
 
-		// EIP-8304: index the generated block so its post-execution system
-		// calls match a re-import of the same chain.
-		if cm.logIndex != nil {
-			cm.logIndex.AddBlockData(block.Header(), block.Body(), receipts)
-		}
-
 		// Advance the chain.
 		cm.add(block, receipts)
 		parent = block
@@ -621,15 +613,15 @@ type chainMaker struct {
 	chain       []*types.Block
 	chainByHash map[common.Hash]*types.Block
 	receipts    []types.Receipts
-	logIndex    *logindex.Indexer
+	db          ethdb.Reader // history below the bottom block
 }
 
-func newChainMaker(bottom *types.Block, config *params.ChainConfig, engine consensus.Engine) *chainMaker {
+func newChainMaker(bottom *types.Block, config *params.ChainConfig, engine consensus.Engine, db ethdb.Reader) *chainMaker {
 	return &chainMaker{
 		bottom:      bottom,
 		config:      config,
 		engine:      engine,
-		logIndex:    logindex.NewMemoryIndexer(),
+		db:          db,
 		chainByHash: make(map[common.Hash]*types.Block),
 	}
 }
@@ -688,7 +680,27 @@ func (cm *chainMaker) GetHeaderByHash(hash common.Hash) *types.Header {
 }
 
 func (cm *chainMaker) GetHeader(hash common.Hash, number uint64) *types.Header {
+	if number < cm.bottom.NumberU64() && cm.db != nil {
+		return rawdb.ReadHeader(cm.db, hash, number)
+	}
 	return cm.GetHeaderByNumber(number)
+}
+
+// GetIndexReceipts implements logindex.AncestorReader: the receipts of the
+// generated blocks, and of the history below the bottom block from the
+// database.
+func (cm *chainMaker) GetIndexReceipts(hash common.Hash, number uint64) (types.Receipts, error) {
+	if number > cm.bottom.NumberU64() {
+		i := number - cm.bottom.NumberU64() - 1
+		if i >= uint64(len(cm.chain)) || cm.chain[i].Hash() != hash {
+			return nil, fmt.Errorf("block %d not generated yet", number)
+		}
+		return cm.receipts[i], nil
+	}
+	if cm.db == nil {
+		return nil, fmt.Errorf("history below block %d not available", cm.bottom.NumberU64())
+	}
+	return readIndexReceipts(cm.db, hash, number)
 }
 
 func (cm *chainMaker) GetBlock(hash common.Hash, number uint64) *types.Block {

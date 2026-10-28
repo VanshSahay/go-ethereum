@@ -223,13 +223,9 @@ func (p *StateProcessor) processParallel(ctx context.Context, block *types.Block
 	// index producer is attached only the stateless level-0 root is computed.
 	var tablesToWrite []TableWrite
 	if config.IsEIP8304(header.Number, header.Time) && postEVM.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		if p.logIndex != nil {
-			tablesToWrite, err = p.logIndex.TableWritesForBlock(header.Number.Uint64(), header.ParentHash, receipts)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			tablesToWrite = BuildLogIndexForBlock(header.Number.Uint64(), header.ParentHash, receipts)
+		tablesToWrite, err = DeriveLogIndexWrites(p.chain, config, header.Number.Uint64(), header.ParentHash, receipts)
+		if err != nil {
+			return nil, err
 		}
 	}
 	requests, postBAL, err := PostExecution(ctx, config, header.Number, header.Time, allLogs, tablesToWrite, postEVM, postIndex)

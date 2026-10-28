@@ -184,11 +184,13 @@ func (api *DebugAPI) replayBuild(ctx context.Context, block *types.Block, stated
 	for _, r := range receipts {
 		allLogs = append(allLogs, r.Logs...)
 	}
-	// EIP-8304: log index tables are not built for replay, wired in a later PR
-	// EIP-8304: stateless level-0 index root, exact for single-block replay.
+	// EIP-8304: index tables derived from the chain's history
 	var tablesToWrite []core.TableWrite
 	if config.IsEIP8304(header.Number, header.Time) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		tablesToWrite = core.BuildLogIndexForBlock(header.Number.Uint64(), header.ParentHash, receipts)
+		var err error
+		if tablesToWrite, err = core.DeriveLogIndexWrites(api.eth.blockchain, config, header.Number.Uint64(), header.ParentHash, receipts); err != nil {
+			return nil, nil, 0, common.Hash{}, err
+		}
 	}
 	_, postBal, err := core.PostExecution(ctx, config, header.Number, header.Time, allLogs, tablesToWrite, evm, uint32(tcount+1))
 	if err != nil {

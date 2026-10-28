@@ -364,6 +364,13 @@ func (dlp *downloadTesterPeer) RequestBodies(hashes []common.Hash, sink chan *et
 func (dlp *downloadTesterPeer) RequestReceipts(hashes []common.Hash, gasUsed []uint64, timestamps []uint64, sink chan *eth.Response) (*eth.Request, error) {
 	blobs := eth.ServiceGetReceiptsQuery69(dlp.chain, hashes)
 	receipts := make([]types.Receipts, blobs.Len())
+	for i := range receipts {
+		// serve the real receipts: executing nodes derive the EIP-8304 index
+		// tables from the receipts of earlier blocks
+		if header := dlp.chain.GetHeaderByHash(hashes[i]); header != nil {
+			receipts[i] = dlp.chain.GetRawReceipts(hashes[i], header.Number.Uint64())
+		}
+	}
 
 	// compute hashes
 	hashes = make([]common.Hash, blobs.Len())

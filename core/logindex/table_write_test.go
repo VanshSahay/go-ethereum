@@ -17,6 +17,7 @@
 package logindex
 
 import (
+	"errors"
 	"sort"
 	"testing"
 
@@ -24,19 +25,44 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// TestTableWritesForBlockSchedule feeds 600 blocks through the state-processing
-// producer and pins the publication schedule: a level-0 write for every block
-// whose root matches the stateless derivation, and a higher-level write for a
-// level exactly when its publication deadline falls on the block.
-func TestTableWritesForBlockSchedule(t *testing.T) {
+// feedChain serves a testFeed as the ancestry of a block being built.
+type feedChain struct{ f *testFeed }
+
+func (c feedChain) GetHeader(hash common.Hash, number uint64) *types.Header {
+	if number >= uint64(len(c.f.headers)) || c.f.headers[number] == nil || c.f.headers[number].Hash() != hash {
+		return nil
+	}
+	return c.f.headers[number]
+}
+
+func (c feedChain) GetIndexReceipts(hash common.Hash, number uint64) (types.Receipts, error) {
+	if c.GetHeader(hash, number) == nil {
+		return nil, errors.New("unknown block")
+	}
+	return c.f.receipts[number], nil
+}
+
+var alwaysActive = func(*types.Header) bool { return true }
+
+// TestDeriveTableWritesSchedule feeds 600 blocks through the derivation and
+// pins the publication schedule: a level-0 write for every block whose root
+// matches the stateless derivation, and a higher-level write for a level
+// exactly when its publication deadline falls on the block. The derived
+// higher-level roots must equal the roots of the indexer's merged tables.
+func TestDeriveTableWritesSchedule(t *testing.T) {
 	f := newTestFeed(600)
 	ix := NewMemoryIndexer()
 	defer ix.Stop()
-
 	for i := 1; i <= 600; i++ {
-		writes, err := ix.TableWritesForBlock(uint64(i), f.headers[i].ParentHash, f.receipts[i])
+		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
+	}
+	waitIdle(t, ix)
+
+	var compared int
+	for i := 1; i <= 600; i++ {
+		writes, err := DeriveTableWrites(feedChain{f}, alwaysActive, uint64(i), f.headers[i].ParentHash, f.receipts[i])
 		if err != nil {
-			t.Fatalf("block %d: %v (hasProcessed=%v num=%d head=%d)", i, err, ix.hasProcessedBlock, ix.processedBlockNumber, ix.headBlock)
+			t.Fatalf("block %d: %v", i, err)
 		}
 		if len(writes) == 0 || writes[0] != (TableWrite{
 			FirstBlock: uint64(i),
@@ -59,13 +85,100 @@ func TestTableWritesForBlockSchedule(t *testing.T) {
 			if due != (write != nil) {
 				t.Fatalf("block %d: level %d due=%v, write=%v", i, level, due, write)
 			}
-			if write != nil && write.FirstBlock != first {
+			if write == nil {
+				continue
+			}
+			if write.FirstBlock != first {
 				t.Errorf("block %d: level %d write first_block %d, want %d", i, level, write.FirstBlock, first)
 			}
+			tr, err := ix.storage.getTableReader(tableID{level: level, index: first / size})
+			if err != nil {
+				continue // not merged by the background scheduler
+			}
+			if tr.TableRoot != write.Root {
+				t.Errorf("block %d: level %d derived root %x, merged table root %x", i, level, write.Root, tr.TableRoot)
+			}
+			compared++
 		}
-		ix.AddBlockData(f.headers[i], &types.Body{}, f.receipts[i])
 	}
-	waitIdle(t, ix)
+	if compared < 10 {
+		t.Errorf("only %d derived roots were compared with merged tables", compared)
+	}
+}
+
+// TestDeriveTableWritesPurity pins that the writes depend on nothing but the
+// ancestry: other history gives other roots, an inactive first block
+// suppresses the table, and a due table without reachable history is an error
+// rather than a silently missing write.
+func TestDeriveTableWritesPurity(t *testing.T) {
+	// block 575 publishes the 256-block table starting at block 256 (and the
+	// smaller tables that fall due there)
+	const number = 575
+	f := newTestFeed(600)
+	parent, receipts := f.headers[number].ParentHash, f.receipts[number]
+	top := func(w []TableWrite) TableWrite { return w[len(w)-1] }
+
+	base, err := DeriveTableWrites(feedChain{f}, alwaysActive, number, parent, receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := top(base); got.TableSize != 256 || got.FirstBlock != 256 {
+		t.Fatalf("top write %+v, want the 256-block table at 256", got)
+	}
+	again, _ := DeriveTableWrites(feedChain{f}, alwaysActive, number, parent, receipts)
+	if len(again) != len(base) || top(again) != top(base) {
+		t.Fatalf("derivation is not deterministic")
+	}
+
+	// other receipts inside the covered range change the root
+	g := newTestFeed(600)
+	g.receipts[300] = testReceipts(9999)
+	forked, err := DeriveTableWrites(feedChain{g}, alwaysActive, number, parent, receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top(forked).Root == top(base).Root {
+		t.Error("history with other receipts gave the same root")
+	}
+
+	// activation after the first block drops the higher-level tables
+	late := func(h *types.Header) bool { return h.Number.Uint64() > 256 }
+	w, err := DeriveTableWrites(feedChain{f}, late, number, parent, receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tw := range w {
+		if tw.TableSize == 256 {
+			t.Errorf("table published although the fork was inactive at its first block")
+		}
+	}
+
+	// no ancestry at all: fail closed
+	if _, err := DeriveTableWrites(nil, alwaysActive, number, parent, receipts); !errors.Is(err, ErrNoAncestry) {
+		t.Errorf("missing ancestry: error %v, want ErrNoAncestry", err)
+	}
+	// unreachable history (a hole in the receipts): fail closed
+	h := newTestFeed(600)
+	h.receipts[300] = nil
+	if _, err := DeriveTableWrites(missingReceipts{feedChain{h}, 300}, alwaysActive, number, parent, receipts); err == nil {
+		t.Error("missing receipts did not fail the derivation")
+	}
+	// a block that does not follow the parent chain: fail closed
+	if _, err := DeriveTableWrites(feedChain{f}, alwaysActive, number, common.Hash{1}, receipts); err == nil {
+		t.Error("unknown parent did not fail the derivation")
+	}
+}
+
+type missingReceipts struct {
+	feedChain
+	number uint64
+}
+
+func (m missingReceipts) GetIndexReceipts(hash common.Hash, number uint64) (types.Receipts, error) {
+	if number == m.number {
+		return nil, errors.New("receipts pruned")
+	}
+	return m.feedChain.GetIndexReceipts(hash, number)
 }
 
 // TestGetRangeReadersDecomposition pins that the range reader decomposition

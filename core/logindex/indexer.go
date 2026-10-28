@@ -52,15 +52,12 @@ type Indexer struct {
 	files        *tableFiles // nil in memory mode
 	mergeThreads int
 
-	currentOps           []tableOperation
-	headBlock            uint64
-	headBlockHash        common.Hash
-	finalBlock           uint64
-	cutoffBlock          uint64
-	hasProcessedBlock    bool
-	processedBlockNumber uint64
-	processedBlockId     common.Hash
-	recentHeads          *lru.Cache[common.Hash, *cachedBlockData]
+	currentOps    []tableOperation
+	headBlock     uint64
+	headBlockHash common.Hash
+	finalBlock    uint64
+	cutoffBlock   uint64
+	recentHeads   *lru.Cache[common.Hash, *cachedBlockData]
 
 	shutdown      bool
 	updateMergeCh []chan struct{}
@@ -140,10 +137,7 @@ func (ix *Indexer) deliverInitBlock() {
 	ix.storage.deliverInitBlockHash(number, ix.config.BlockHashAt(number))
 }
 
-// AddBlockData indexes a block that has become part of the canonical chain. If
-// a level-0 table was already built for this block during state processing,
-// the pending writer is finalized with the real block hash; otherwise the
-// table is built from the given data.
+// AddBlockData indexes a block that has become part of the canonical chain.
 func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts types.Receipts) {
 	ix.lock.Lock()
 	if ix.shutdown {
@@ -177,11 +171,8 @@ func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts
 		ix.headBlockHash = header.Hash()
 		ix.recentHeads.Add(header.Hash(), &cachedBlockData{header: header, body: body, receipts: receipts, canonicalUntil: blockNumber})
 	}
-	tw, err := ix.getPartialBlockTableWriter(header)
 	ix.lock.Unlock()
-	if err == nil {
-		err = ix.processBlockTable(tw, header, body, receipts)
-	}
+	err := ix.processBlockTable(header, receipts)
 	if err == nil {
 		ix.lock.Lock()
 		ix.updateTableOperations()
@@ -192,53 +183,28 @@ func (ix *Indexer) AddBlockData(header *types.Header, body *types.Body, receipts
 	}
 }
 
-// getPartialBlockTableWriter resolves the pending writer created during state
-// processing, if any. A writer whose block id does not match the actual header
-// (superseded proposal) is deleted so the table is rebuilt from the delivered
-// data.
-func (ix *Indexer) getPartialBlockTableWriter(header *types.Header) (tableWriterImpl, error) {
-	var tw tableWriterImpl
-	if ix.hasProcessedBlock && ix.processedBlockNumber == header.Number.Uint64() {
-		// A missing pending writer (e.g. removed by a concurrent scheduling
-		// round) is benign: the table content is deterministic from the
-		// delivered block data, so the rebuild path reconstructs it.
-		if header.Hash() == ix.processedBlockId {
-			if tw, err := ix.storage.getTableWriter(tableID{level: 0, index: ix.processedBlockNumber}); err == nil {
-				return tw, nil
-			}
-		} else if err := ix.storage.deleteTable(tableID{level: 0, index: ix.processedBlockNumber}); err != nil && err != errTableNotFound {
-			return nil, err
-		}
-		ix.hasProcessedBlock = false
-	}
-	return tw, nil
-}
-
-// processBlockTable finalizes the pending level-0 writer or builds the table
-// from the given block data.
-func (ix *Indexer) processBlockTable(tw tableWriterImpl, header *types.Header, body *types.Body, receipts types.Receipts) error {
+// processBlockTable builds the level-0 table of the block from its receipts.
+func (ix *Indexer) processBlockTable(header *types.Header, receipts types.Receipts) error {
 	blockNumber := header.Number.Uint64()
 	id := tableID{level: 0, index: blockNumber}
-	if tw == nil {
-		complete, partial, _ := ix.storage.tables()
-		if partial.includes(id) {
-			if err := ix.storage.deleteTable(id); err != nil {
-				return err
-			}
-		}
-		if complete.includes(id) {
-			return nil
-		}
-		entries := blockEntries(blockNumber, header.ParentHash, receipts)
-		var err error
-		if tw, err = ix.storage.addNewTableWriter(id, uint64(len(entries))); err != nil {
+	complete, partial, _ := ix.storage.tables()
+	if partial.includes(id) {
+		if err := ix.storage.deleteTable(id); err != nil {
 			return err
 		}
-		for _, entry := range entries {
-			if err := tw.addEntry(entry); err != nil {
-				ix.storage.deleteTable(id)
-				return err
-			}
+	}
+	if complete.includes(id) {
+		return nil
+	}
+	entries := blockEntries(blockNumber, header.ParentHash, receipts)
+	tw, err := ix.storage.addNewTableWriter(id, uint64(len(entries)))
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := tw.addEntry(entry); err != nil {
+			ix.storage.deleteTable(id)
+			return err
 		}
 	}
 	tw.setMeta(TableMeta{
@@ -247,19 +213,14 @@ func (ix *Indexer) processBlockTable(tw tableWriterImpl, header *types.Header, b
 		LastBlockHash:   header.Hash(),
 		ParentHash:      header.ParentHash,
 	})
-	// A writer created by the processing path is already finalized (its root
-	// was needed for the in-block system call); only a rebuilt one needs the
-	// finalize loop here.
-	if tw.getPhase() != wpFinalized {
-		for {
-			done, err := tw.finalize()
-			if err != nil {
-				ix.storage.deleteTable(id)
-				return err
-			}
-			if done {
-				break
-			}
+	for {
+		done, err := tw.finalize()
+		if err != nil {
+			ix.storage.deleteTable(id)
+			return err
+		}
+		if done {
+			break
 		}
 	}
 	return ix.storage.finalizeTableWriter(id)
@@ -273,27 +234,8 @@ func (ix *Indexer) updateTableOperations() {
 		ix.deliverInitBlock()
 		return
 	}
-	// Protect the pending process-time table from the scheduler: the index
-	// head has not advanced past its block yet, so it looks unrequired and
-	// would be scheduled for deletion while the block awaits insertion.
-	var pending tableID
-	pendingProtected := ix.hasProcessedBlock
-	if pendingProtected {
-		pending = tableID{level: 0, index: ix.processedBlockNumber}
-		partialSet[0] = partialSet[0].Difference(common.SingleRangeSet[uint64](common.NewRange[uint64](pending.index, 1)))
-	}
 	targetSet := ix.makeTargetSet(completeSet)
 	tableOps, _ := ix.params.nextTableOperations(completeSet, partialSet, targetSet, ix.mergeThreads, ix.mergeThreads)
-	if pendingProtected {
-		filtered := tableOps[:0]
-		for _, op := range tableOps {
-			if op.operation == opDelete && op.id == pending {
-				continue
-			}
-			filtered = append(filtered, op)
-		}
-		tableOps = filtered
-	}
 	updateOps := make([]bool, ix.mergeThreads)
 	for i, co := range ix.currentOps {
 		var found bool

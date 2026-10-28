@@ -225,17 +225,12 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 
 	// EIP-8304: build the index table roots committed by this block. No-op
 	// before the fork activates or when the contract is not deployed
-	// (non-dev chains). The chain's index producer runs the full publication
-	// schedule; without an index only the stateless level-0 root is computed.
+	// (non-dev chains). The tables are derived from the chain's history.
 	var tablesToWrite []core.TableWrite
 	if miner.chainConfig.IsEIP8304(work.header.Number, work.header.Time) && work.evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		if ix := miner.chain.LogIndex(); ix != nil {
-			tablesToWrite, err = ix.TableWritesForBlock(work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
-			if err != nil {
-				return &newPayloadResult{err: err}
-			}
-		} else {
-			tablesToWrite = core.BuildLogIndexForBlock(work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
+		tablesToWrite, err = core.DeriveLogIndexWrites(miner.chain, miner.chainConfig, work.header.Number.Uint64(), work.header.ParentHash, work.receipts)
+		if err != nil {
+			return &newPayloadResult{err: err}
 		}
 	}
 

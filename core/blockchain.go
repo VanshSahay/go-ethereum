@@ -468,9 +468,6 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 			return nil, err
 		}
 		bc.logIndex = ix
-		if sp, ok := bc.processor.(*StateProcessor); ok {
-			sp.logIndex = ix
-		}
 	}
 
 	genesisHeader := bc.GetHeaderByNumber(0)

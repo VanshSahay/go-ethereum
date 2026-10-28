@@ -371,7 +371,7 @@ func TestStateProcessorErrors(t *testing.T) {
 func GenerateBadBlock(parent *types.Block, engine consensus.Engine, txs types.Transactions, config *params.ChainConfig, isPOW bool) *types.Block {
 	difficulty := big.NewInt(0)
 	if isPOW {
-		fakeChainReader := newChainMaker(nil, config, engine)
+		fakeChainReader := newChainMaker(nil, config, engine, nil)
 		difficulty = engine.CalcDifficulty(fakeChainReader, parent.Time()+10, &types.Header{
 			Number:     parent.Number(),
 			Time:       parent.Time(),

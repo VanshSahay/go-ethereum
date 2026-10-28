@@ -26,7 +26,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
-	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -44,8 +43,7 @@ import (
 //
 // StateProcessor implements Processor.
 type StateProcessor struct {
-	chain    ChainContext      // Chain context interface
-	logIndex *logindex.Indexer // optional EIP-8304 index table producer
+	chain ChainContext // Chain context interface
 }
 
 // NewStateProcessor initialises a new StateProcessor.
@@ -141,14 +139,10 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 	// stateless level-0 root is computed.
 	var tablesToWrite []TableWrite
 	if config.IsEIP8304(block.Number(), block.Time()) && evm.StateDB.GetCodeSize(params.IndexContractAddress) > 0 {
-		if p.logIndex != nil {
-			var err error
-			tablesToWrite, err = p.logIndex.TableWritesForBlock(block.Number().Uint64(), block.ParentHash(), receipts)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			tablesToWrite = BuildLogIndexForBlock(block.Number().Uint64(), block.ParentHash(), receipts)
+		var err error
+		tablesToWrite, err = DeriveLogIndexWrites(p.chain, config, block.NumberU64(), block.ParentHash(), receipts)
+		if err != nil {
+			return nil, err
 		}
 	}
 	requests, bal, err := PostExecution(ctx, config, block.Number(), block.Time(), allLogs, tablesToWrite, evm, uint32(len(block.Transactions())+1))
