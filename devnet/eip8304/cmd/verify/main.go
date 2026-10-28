@@ -222,7 +222,6 @@ func tamper(raw []byte, idx int) ([]byte, error) {
 		switch v := value.(type) {
 		case []interface{}:
 			for i := range v {
-				i := i
 				if s, ok := v[i].(string); ok {
 					if _, ok := flipByte(s); ok {
 						sites = append(sites, site{func() string { return v[i].(string) }, func(n string) { v[i] = n }})
@@ -238,7 +237,6 @@ func tamper(raw []byte, idx int) ([]byte, error) {
 			}
 			sort.Strings(keys)
 			for _, key := range keys {
-				key := key
 				if top && (key == "query" || key == "refHeader") || key == "hash" {
 					continue
 				}

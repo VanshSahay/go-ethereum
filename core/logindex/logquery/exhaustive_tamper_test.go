@@ -80,7 +80,7 @@ func collectLeaves(doc interface{}) []proofLeaf {
 		switch c := v.(type) {
 		case []interface{}:
 			for i := range c {
-				i, p := i, fmt.Sprintf("%s[%d]", path, i)
+				p := fmt.Sprintf("%s[%d]", path, i)
 				if _, ok := flipLeaf(c[i]); ok {
 					out = append(out, proofLeaf{p, func(n interface{}) { c[i] = n }, func() interface{} { return c[i] }})
 				} else {
@@ -94,7 +94,7 @@ func collectLeaves(doc interface{}) []proofLeaf {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				k, p := k, path+"."+k
+				p := path + "." + k
 				if k == "hash" {
 					continue
 				}
