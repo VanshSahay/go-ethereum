@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -292,6 +293,12 @@ type readerSource struct {
 	maxRun  int // longest run the source may return; zero means unbounded
 	touched []uint64
 	err     error
+}
+
+func (rs *readerSource) mark() int { return len(rs.touched) }
+
+func (rs *readerSource) drop(from, to int) {
+	rs.touched = slices.Delete(rs.touched, from, to)
 }
 
 func (rs *readerSource) valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool) {

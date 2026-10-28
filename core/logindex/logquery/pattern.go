@@ -70,6 +70,13 @@ type runSource interface {
 	// content within [begin, end], in ascending order. It reports false when
 	// the source cannot guarantee that the run is complete.
 	valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool)
+
+	// mark returns the current length of the source's record of touched
+	// entries, and drop forgets the record made between two marks. A pattern
+	// that evaluates alternatives and keeps only some of them uses them to
+	// leave out the entries of the discarded ones from the proof.
+	mark() int
+	drop(from, to int)
 }
 
 // matcherValue is the searchable content of a leaf matcher: an entry type plus
@@ -423,20 +430,58 @@ func (m matchAll) matchLogs(logs []*types.Log, index int) bool {
 	return true
 }
 
-// candidates is the intersection of the candidates of the bounded children: a
-// match matches every child, so one bounded child is enough to bound the
-// pattern, and each further bounded child only narrows the set.
+// receiptCost is the cost of proving the receipt of one candidate position,
+// in units of one proven table entry. It drives the choice of which children
+// of an allOf are proven.
+const receiptCost = 16
+
+// candidates bounds the match positions by the candidates of the bounded
+// children: a match matches every child, so one bounded child is enough to
+// bound the pattern, and each further child only narrows the set at the price
+// of proving its entry run. The cheapest alternative is chosen: a single child
+// (its run plus a receipt for each of its candidates) or all of them (every run
+// plus a receipt for each candidate of the intersection). Only the entries of
+// the chosen children end up in the proof.
 func (m matchAll) candidates(src runSource, begin, end types.IndexPosition) (indexPositionSet, bool) {
-	var sets []indexPositionSet
+	type child struct {
+		set      indexPositionSet
+		from, to int // the entries this child's evaluation touched
+	}
+	var children []child
 	for _, mm := range m {
+		from := src.mark()
 		if set, ok := mm.candidates(src, begin, end); ok {
-			sets = append(sets, set)
+			children = append(children, child{set, from, src.mark()})
 		}
 	}
-	if len(sets) == 0 {
+	if len(children) == 0 {
 		return nil, false
 	}
-	return ipsIntersection(sets), true
+	runCost := func(c child) int { return c.to - c.from }
+	all := make([]indexPositionSet, len(children))
+	for i, c := range children {
+		all[i] = c.set
+	}
+	merged := ipsIntersection(all)
+	best, bestCost := -1, len(merged)*receiptCost
+	for _, c := range children {
+		bestCost += runCost(c)
+	}
+	for i, c := range children {
+		if cost := runCost(c) + len(c.set)*receiptCost; cost < bestCost {
+			best, bestCost = i, cost
+		}
+	}
+	if best < 0 {
+		return merged, true
+	}
+	// keep only the chosen child: forget the entries of the others, last first
+	for i := len(children) - 1; i >= 0; i-- {
+		if i != best {
+			src.drop(children[i].from, children[i].to)
+		}
+	}
+	return children[best].set, true
 }
 
 func (m matchAll) MarshalJSON() ([]byte, error) {

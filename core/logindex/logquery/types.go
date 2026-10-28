@@ -135,6 +135,10 @@ func valueBoundary(typ uint32, content []byte, p types.IndexPosition) types.Inde
 //
 // An empty run is shown the same way, by two adjacent proven entries (or a
 // table edge) that enclose the range.
+// mark and drop implement runSource: the verifier records nothing.
+func (tqp *tableQueryProof) mark() int     { return 0 }
+func (tqp *tableQueryProof) drop(int, int) {}
+
 func (tqp *tableQueryProof) valueRun(typ uint32, content []byte, begin, end types.IndexPosition) (indexPositionSet, bool) {
 	n := len(tqp.ProvenEntries)
 	if n == 0 {

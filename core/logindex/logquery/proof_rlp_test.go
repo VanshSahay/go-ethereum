@@ -72,3 +72,46 @@ func TestProofRLPRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestAllOfProvesOnlyTheCheapestChild pins the allOf proof-size optimizer: an
+// address that matches every log AND a rare topic must prove no more entries
+// than the rare topic alone, and still verify to the same logs.
+func TestAllOfProvesOnlyTheCheapestChild(t *testing.T) {
+	rtc := newRTChainWith(t, 40, diffEmitterCode(), func(block int) int { return block%3 + 1 })
+	emitter := crypto.CreateAddress(rtSender, 1)
+	entries := func(proof *QueryProof) (n int) {
+		for _, tqp := range proof.TableQueryProofs {
+			n += len(tqp.ProvenEntries)
+		}
+		return n
+	}
+	run := func(js string) (*QueryProof, int) {
+		pattern, err := NewPatternMatcherFromJSON(json.RawMessage(js))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := FilterQuery{Pattern: pattern, FirstBlock: 1, LastBlock: 39, Limit: 1000}
+		logs, _, proof, err := rtc.matcher.GetMatches(context.Background(), &rtView{rtc}, req, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := proof.Verify(rtc.bc.CurrentBlock(), req, DefaultVerifyOptions(rtc.bc.Config()))
+		if err != nil {
+			t.Fatalf("verify %s: %v", js, err)
+		}
+		if len(res.Logs) != len(logs) {
+			t.Fatalf("verified %d logs, served %d", len(res.Logs), len(logs))
+		}
+		return proof, len(logs)
+	}
+	rare := topicLeaf(1, topicB)
+	alone, nAlone := run(rare)
+	both, nBoth := run(fmt.Sprintf(`{"allOf":[%s,%s]}`, addrLeaf(emitter), rare))
+	if nAlone != nBoth || nAlone == 0 {
+		t.Fatalf("results differ: alone %d, with address %d", nAlone, nBoth)
+	}
+	t.Logf("proven entries: topic alone %d, address+topic %d", entries(alone), entries(both))
+	if entries(both) > entries(alone) {
+		t.Errorf("address+topic proves %d entries, the topic alone %d", entries(both), entries(alone))
+	}
+}
