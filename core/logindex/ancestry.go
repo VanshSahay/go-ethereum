@@ -109,6 +109,11 @@ type derivedRoot struct {
 	published bool
 }
 
+// ResetDerivedRoots empties the cache of derived table roots. Production code
+// never needs it (blocks are immutable); tests that remove history from a
+// database use it to make the derivation read the database again.
+func ResetDerivedRoots() { derivedRoots = lru.NewCache[derivedKey, derivedRoot](256) }
+
 // derivedRoots caches derived higher-level table roots.
 var derivedRoots = lru.NewCache[derivedKey, derivedRoot](256)
 

@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/core/logindex"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -159,6 +160,7 @@ func TestIndexHistoryPruned(t *testing.T) {
 	}
 	rawdb.DeleteReceipts(db, chain[599].Hash(), 600)
 
+	logindex.ResetDerivedRoots() // the chain generator derived these roots already
 	n, err := bc.InsertChain(chain[620:])
 	if err == nil {
 		t.Fatal("blocks needing a pruned receipt set were imported")
